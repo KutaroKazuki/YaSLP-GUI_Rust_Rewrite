@@ -532,9 +532,20 @@ async fn main() {
         .route("/api/info", get(get_info))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{port}");
+    let ip = local_ip().unwrap_or_else(|| "127.0.0.1".into());
+    let addr = format!("{ip}:{port}");
     println!("YaSLP-Web listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind");
     axum::serve(listener, app).await.expect("Server error");
+}
+
+/// Detect the machine's outbound local IP by connecting a UDP socket to an
+/// external address (no packets are actually sent).
+fn local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }
