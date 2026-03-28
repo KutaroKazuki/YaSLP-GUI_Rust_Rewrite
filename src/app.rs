@@ -535,7 +535,7 @@ impl YaSLPApp {
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new("YaSLP-GUI v1.0")
+                            RichText::new(concat!("YaSLP-GUI v", env!("CARGO_PKG_VERSION")))
                                 .small()
                                 .color(C_TEXT_DIM),
                         );
@@ -783,7 +783,7 @@ impl YaSLPApp {
                             .strong(),
                     );
                     ui.label(
-                        RichText::new("v1.0  —  Rust Edition")
+                        RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), "  —  Rust Edition"))
                             .color(C_ACCENT)
                             .small(),
                     );
