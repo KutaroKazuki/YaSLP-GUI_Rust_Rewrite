@@ -588,9 +588,6 @@ impl YaSLPApp {
                             if ui.add(accent_button("GreatWizard")).clicked() {
                                 self.edit.server_list_url = "https://raw.githubusercontent.com/GreatWizard/lan-play-status/master/src/data/servers.json".into();
                             }
-                            if ui.add(accent_button("r3n3.at (old)")).clicked() {
-                                self.edit.server_list_url = "http://nut.r3n3.at/jsonlist.php".into();
-                            }
                         });
                         ui.end_row();
 

@@ -1,6 +1,6 @@
 [package]
 name = "yaslp-gui"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 description = "Yet another Switch LAN Play GUI - Cross-platform Rust rewrite"
 license = "GPL-3.0"
