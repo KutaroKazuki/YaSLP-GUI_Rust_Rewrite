@@ -532,7 +532,7 @@ async fn main() {
         .route("/api/info", get(get_info))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    let addr = format!("127.0.0.1:{port}");
     println!("YaSLP-Web listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind");
