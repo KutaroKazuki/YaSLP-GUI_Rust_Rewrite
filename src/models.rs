@@ -135,7 +135,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             server_list_url: "https://raw.githubusercontent.com/GreatWizard/lan-play-status/master/src/data/servers.json".into(),
-            http_timeout_ms: 3000,
+            http_timeout_ms: 500,
             client_dir: default_client_dir(),
             param_mode: ParamMode::Default,
             custom_params: String::new(),
