@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YaSLP-GUI — Switch LAN Play</title>
+  <style>
+    /* ── Palette ──────────────────────────────────────────────────────── */
+    :root {
+      --bg:        #0a0a14;
+      --panel:     #121324;
+      --card:      #1a1c34;
+      --card-sel:  #282c50;
+      --border:    #323664;
+      --accent:    #7c83fd;
+      --accent2:   #646cdc;
+      --text:      #e1e2f5;
+      --text-dim:  #8286af;
+      --online:    #4ade80;
+      --offline:   #646482;
+      --warn:      #fbbf24;
+      --err:       #f87171;
+    }
+
+    /* ── Reset ────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Top bar ──────────────────────────────────────────────────────── */
+    .topbar {
+      height: 56px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .logo-circle {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; color: #fff; flex-shrink: 0;
+    }
+
+    .topbar-title { font-size: 20px; font-weight: 700; color: var(--text); }
+    .topbar-sub   { font-size: 11px; color: var(--text-dim); }
+
+    .topbar-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: inherit;
+      padding: 0 14px;
+      height: 30px;
+      white-space: nowrap;
+      transition: opacity .15s, background .15s;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      min-width: 110px;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent2); }
+
+    .btn-secondary {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .btn-secondary:hover:not(:disabled) { background: var(--card-sel); }
+
+    .btn-danger {
+      background: var(--err);
+      color: #fff;
+      font-weight: 600;
+    }
+    .btn-danger:hover:not(:disabled) { opacity: .85; }
+
+    /* ── Main layout ──────────────────────────────────────────────────── */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Server list panel ────────────────────────────────────────────── */
+    .server-list {
+      flex: 1;
+      background: var(--panel);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .list-toolbar {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+
+    .list-toolbar .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .list-toolbar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .counter { font-size: 11px; color: var(--text-dim); }
+
+    .hide-offline-label {
+      font-size: 11px;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .hide-offline-label input { cursor: pointer; accent-color: var(--accent); }
+
+    /* Progress bar */
+    .progress-wrap {
+      height: 6px;
+      background: var(--card);
+      border-radius: 3px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width .2s;
+    }
+
+    /* Table */
+    .table-wrap {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+    }
+
+    thead th {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-weight: 600;
+      text-align: left;
+      padding: 4px 8px 8px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      background: var(--card);
+      cursor: pointer;
+      transition: background .1s;
+    }
+    tbody tr:hover   { background: var(--card-sel); }
+    tbody tr.selected {
+      background: var(--card-sel);
+      outline: 1px solid var(--accent);
+      outline-offset: -1px;
+    }
+    tbody tr + tr { border-top: 2px solid var(--panel); }
+
+    tbody td {
+      padding: 8px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .dot-online  { color: var(--online); }
+    .dot-offline { color: var(--offline); }
+    .ping-good   { color: var(--online); }
+    .ping-warn   { color: var(--warn); }
+    .ping-bad    { color: var(--err); }
+    .ping-none   { color: var(--text-dim); }
+
+    .empty-msg {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      color: var(--text-dim);
+      font-style: italic;
+    }
+
+    /* ── Side panel ───────────────────────────────────────────────────── */
+    .side-panel {
+      width: 248px;
+      flex-shrink: 0;
+      background: var(--bg);
+      border-left: 1px solid var(--border);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      overflow-y: auto;
+    }
+
+    .side-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+    }
+
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      gap: 8px;
+    }
+    .detail-label { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+    .detail-value { color: var(--text); font-size: 12px; text-align: right; word-break: break-all; }
+
+    .side-sep {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 12px 0;
+    }
+
+    .hint-text {
+      color: var(--text-dim);
+      font-style: italic;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .btn-copy, .btn-connect, .btn-disconnect {
+      width: 100%;
+      color: #fff;
+      font-weight: 600;
+      border-radius: 8px;
+      height: 32px;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .btn-copy       { background: var(--card); border: 1px solid var(--border); color: var(--text); }
+    .btn-copy:hover { background: var(--card-sel); }
+    .btn-copy.copied { background: var(--online); color: #000; border-color: var(--online); }
+    .btn-connect    { background: var(--accent); }
+    .btn-connect:hover:not(:disabled) { background: var(--accent2); }
+    .btn-disconnect { background: var(--err); }
+    .btn-disconnect:hover { opacity: .85; }
+
+    /* Console in side panel */
+    .console-wrap {
+      margin-top: 10px;
+    }
+    .console-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 4px;
+    }
+    .console-box {
+      background: #06060f;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 10px;
+      color: #a0d0a0;
+      max-height: 140px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    /* ── Bottom bar ───────────────────────────────────────────────────── */
+    .statusbar {
+      height: 26px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .statusbar span { font-size: 11px; color: var(--text-dim); }
+    .status-connected { color: var(--online) !important; font-weight: 600; }
+
+    /* ── Modal overlay ────────────────────────────────────────────────── */
+    .overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.6);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .overlay.open { display: flex; }
+
+    .modal {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      min-width: 360px;
+      max-width: 500px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    }
+
+    .modal-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 16px;
+    }
+
+    .form-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .form-row label {
+      width: 130px;
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .form-row input[type="text"],
+    .form-row input[type="number"],
+    .form-row input[type="password"],
+    .form-row select {
+      flex: 1;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+      padding: 5px 8px;
+      outline: none;
+    }
+    .form-row input:focus,
+    .form-row select:focus { border-color: var(--accent); }
+
+    .form-row select option { background: var(--panel); }
+
+    .modal-footer {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    /* About modal */
+    .about-logo {
+      width: 64px; height: 64px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px;
+      color: #fff;
+      margin: 0 auto 12px;
+    }
+    .about-center { text-align: center; }
+    .about-version { color: var(--accent); font-size: 11px; margin-top: 4px; }
+    .about-sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+    .about-desc { color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+
+    /* Download status */
+    .dl-status {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .dl-status.ok  { color: var(--online); }
+    .dl-status.err { color: var(--err); }
+
+    /* Quick connect input */
+    .qc-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .qc-row input {
+      flex: 1;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+      padding: 5px 8px;
+      outline: none;
+    }
+    .qc-row input:focus { border-color: var(--accent); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--panel); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent2); }
+  </style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────────── -->
+<header class="topbar">
+  <div class="logo-circle">⊕</div>
+  <span class="topbar-title">YaSLP-GUI</span>
+  <span class="topbar-sub">Switch LAN Play</span>
+  <div class="topbar-actions">
+    <button class="btn-primary" id="btn-refresh" onclick="startRefresh()">⟳ Refresh</button>
+    <button class="btn-secondary" onclick="openQuickConnect()">⚡ Quick Connect</button>
+    <button class="btn-secondary" onclick="openSettings()">⚙ Settings</button>
+    <button class="btn-secondary" onclick="openAbout()">About</button>
+  </div>
+</header>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Server list -->
+  <section class="server-list">
+    <div class="list-toolbar">
+      <span class="section-title">Servers</span>
+      <div class="list-toolbar-right">
+        <span class="counter" id="counter">— online / — total</span>
+        <label class="hide-offline-label">
+          <input type="checkbox" id="hide-offline" checked onchange="renderTable()">
+          Hide offline
+        </label>
+      </div>
+    </div>
+
+    <div class="progress-wrap" id="progress-wrap" style="display:none">
+      <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+    </div>
+
+    <div class="table-wrap" id="table-wrap">
+      <div class="empty-msg" id="empty-msg">Click Refresh to load servers.</div>
+      <table id="server-table" style="display:none">
+        <thead>
+          <tr>
+            <th>Address</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Region</th>
+            <th>Version</th>
+            <th>Online</th>
+            <th>Idle</th>
+            <th>Active</th>
+            <th>Ping</th>
+          </tr>
+        </thead>
+        <tbody id="server-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Side panel -->
+  <aside class="side-panel">
+    <div class="side-title">Server Details</div>
+    <div id="side-content">
+      <p class="hint-text">Select a server<br>to see details.</p>
+    </div>
+  </aside>
+
+</div>
+
+<!-- ── Bottom bar ───────────────────────────────────────────────────────── -->
+<footer class="statusbar">
+  <span id="status-msg">Ready — click Refresh to load servers.</span>
+  <span id="version-label">YaSLP-Web</span>
+</footer>
+
+<!-- ── Quick Connect modal ──────────────────────────────────────────────── -->
+<div class="overlay" id="overlay-quickconnect">
+  <div class="modal" style="min-width:340px;max-width:420px">
+    <div class="modal-title">⚡ Quick Connect</div>
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
+      Connect directly to a relay server by address.
+    </p>
+    <div class="form-row">
+      <label>Relay Address</label>
+      <input type="text" id="qc-addr" placeholder="1.2.3.4:11451"
+        onkeydown="if(event.key==='Enter')quickConnectSubmit()">
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" style="min-width:90px" onclick="quickConnectSubmit()">Connect</button>
+      <button class="btn-secondary" onclick="closeModal('overlay-quickconnect')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ───────────────────────────────────────────────────── -->
+<div class="overlay" id="overlay-settings">
+  <div class="modal">
+    <div class="modal-title">⚙ Settings</div>
+    <div class="form-row">
+      <label>HTTP Timeout (ms)</label>
+      <input type="number" id="cfg-timeout" value="500" min="100" max="30000" style="width:80px;flex:none">
+    </div>
+    <div class="form-row">
+      <label>Server List URL</label>
+      <input type="text" id="cfg-url">
+    </div>
+    <div class="form-row">
+      <label style="color:var(--text-dim);font-size:11px">Presets</label>
+      <button class="btn-secondary" onclick="setPreset('https://raw.githubusercontent.com/GreatWizard/lan-play-status/master/src/data/servers.json')">GreatWizard</button>
+    </div>
+    <div class="form-row">
+      <label>Client Directory</label>
+      <input type="text" id="cfg-clientdir" placeholder="path to lan-play binary">
+    </div>
+    <div class="form-row">
+      <label>Param Mode</label>
+      <select id="cfg-parammode">
+        <option value="Default">Default</option>
+        <option value="Acnh">ACNH (--pmtu 500)</option>
+        <option value="Custom">Custom</option>
+      </select>
+    </div>
+    <div class="form-row" id="row-customparam" style="display:none">
+      <label>Custom Params</label>
+      <input type="text" id="cfg-customparam" placeholder="--pmtu 500 ...">
+    </div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:8px 0 12px">
+    <div class="form-row" style="align-items:flex-start">
+      <label style="padding-top:4px">lan-play Binary</label>
+      <div style="flex:1">
+        <button class="btn-secondary" style="width:100%" onclick="downloadBinary()">⬇ Download Binary</button>
+        <div class="dl-status" id="dl-status"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" style="min-width:80px" onclick="saveSettings()">Save</button>
+      <button class="btn-secondary" onclick="closeModal('overlay-settings')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── About modal ──────────────────────────────────────────────────────── -->
+<div class="overlay" id="overlay-about">
+  <div class="modal" style="min-width:320px;max-width:360px">
+    <div class="about-center">
+      <div class="about-logo">⊕</div>
+      <div class="modal-title" style="margin-bottom:0">YaSLP-GUI</div>
+      <div class="about-version" id="about-version">Web Edition</div>
+      <hr class="about-sep">
+      <p class="about-desc">
+        Yet another Switch LAN Play GUI<br><br>
+        Web port of the cross-platform Rust app.<br>
+        Serves a REST API so the frontend can<br>
+        connect, disconnect, and monitor servers.
+      </p>
+    </div>
+    <div class="modal-footer" style="justify-content:center;margin-top:20px">
+      <button class="btn-secondary" onclick="closeModal('overlay-about')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sudo password dialog ──────────────────────────────────────────────── -->
+<div class="overlay" id="overlay-sudo">
+  <div class="modal" style="min-width:320px;max-width:380px">
+    <div class="modal-title">🔒 sudo password</div>
+    <p style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
+      Privileged mode requires sudo. Enter your password to connect.
+    </p>
+    <div class="form-row">
+      <label>Password</label>
+      <input type="password" id="sudo-password" placeholder="password" onkeydown="if(event.key==='Enter')sudoConnect()">
+    </div>
+    <div class="modal-footer">
+      <button class="btn-primary" style="min-width:80px" onclick="sudoConnect()">Connect</button>
+      <button class="btn-secondary" onclick="closeModal('overlay-sudo')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ────────────────────────────────────────────────────────────────
+  let servers    = [];
+  let selected   = null;
+  let refreshing = false;
+  let connected  = false;
+  let connectedAddr = null;
+  let pendingConnectAddr = null;
+  let pollTimer  = null;
+
+  let info = { platform: 'linux', privileged: true, version: '1.0.4' };
+
+  let cfg = {
+    url:         'https://raw.githubusercontent.com/GreatWizard/lan-play-status/master/src/data/servers.json',
+    timeout:     500,
+    clientDir:   '',
+    paramMode:   'Default',
+    customParams:'',
+    privileged:  true,
+  };
+
+  // ── Init ─────────────────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', async () => {
+    await loadInfo();
+    await loadSettings();
+    startPoll();
+  });
+
+  async function loadInfo() {
+    try {
+      const r = await fetch('/api/info');
+      info = await r.json();
+      document.getElementById('version-label').textContent =
+        'YaSLP-Web v' + (info.version || '?');
+      document.getElementById('about-version').textContent =
+        'v' + (info.version || '?') + ' — Web Edition';
+    } catch {}
+  }
+
+  async function loadSettings() {
+    try {
+      const r = await fetch('/api/settings');
+      const s = await r.json();
+      cfg.url          = s.server_list_url || cfg.url;
+      cfg.timeout      = s.http_timeout_ms || cfg.timeout;
+      cfg.clientDir    = s.client_dir      || '';
+      cfg.paramMode    = s.param_mode      || 'Default';
+      cfg.customParams = s.custom_params   || '';
+      cfg.privileged   = s.privileged !== false;
+    } catch {}
+  }
+
+  // ── Polling ───────────────────────────────────────────────────────────────
+  function startPoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(poll, 600);
+  }
+
+  async function poll() {
+    // Always poll state (connection status + console + download)
+    try {
+      const r = await fetch('/api/state');
+      const s = await r.json();
+      connected     = s.connected;
+      connectedAddr = s.addr || null;
+      updateConnectionUI(s);
+    } catch {}
+
+    // Poll servers during refresh
+    if (refreshing) {
+      try {
+        const r = await fetch('/api/servers');
+        const d = await r.json();
+        servers   = d.servers || [];
+        refreshing = d.refreshing;
+
+        const done  = d.done  || 0;
+        const total = d.total || 0;
+        const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+        document.getElementById('progress-bar').style.width = pct + '%';
+        setStatus('Checking servers… ' + done + '/' + total);
+        renderTable();
+        updateCounter();
+
+        if (!refreshing) {
+          finishRefresh(d.error);
+        }
+      } catch {}
+    }
+  }
+
+  function updateConnectionUI(state) {
+    const statusEl = document.getElementById('status-msg');
+    if (connected) {
+      if (!statusEl.classList.contains('status-connected')) {
+        statusEl.classList.add('status-connected');
+        setStatus('● Connected to ' + (connectedAddr || '?'));
+      }
+    } else {
+      statusEl.classList.remove('status-connected');
+    }
+
+    // Update download status in settings if open
+    if (state.download_state && state.download_state !== 'idle') {
+      const el = document.getElementById('dl-status');
+      if (el) {
+        if (state.download_state === 'downloading') {
+          el.className = 'dl-status'; el.textContent = 'Downloading…';
+        } else if (state.download_state === 'done') {
+          el.className = 'dl-status ok'; el.textContent = '✓ Downloaded successfully';
+        } else {
+          el.className = 'dl-status err'; el.textContent = state.download_state.replace(/^error: ?/, '');
+        }
+      }
+    }
+
+    // Re-render side panel to update connect/disconnect button
+    renderSidePanel();
+  }
+
+  // ── Refresh ───────────────────────────────────────────────────────────────
+  async function startRefresh() {
+    if (refreshing) return;
+    selected   = null;
+    servers    = [];
+    refreshing = true;
+
+    const btnRefresh = document.getElementById('btn-refresh');
+    btnRefresh.disabled  = true;
+    btnRefresh.textContent = '⟳ Fetching…';
+    setStatus('Fetching server list…');
+    document.getElementById('empty-msg').style.display = 'flex';
+    document.getElementById('empty-msg').textContent = 'Fetching server list…';
+    document.getElementById('server-table').style.display = 'none';
+    document.getElementById('progress-wrap').style.display = 'block';
+    document.getElementById('progress-bar').style.width = '0%';
+    renderSidePanel();
+
+    try {
+      const r = await fetch('/api/refresh', { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        finishRefresh(d.error || ('HTTP ' + r.status));
+      }
+      // Poll will take over from here
+    } catch (e) {
+      finishRefresh(e.message);
+    }
+  }
+
+  function finishRefresh(error) {
+    refreshing = false;
+    document.getElementById('progress-wrap').style.display = 'none';
+    const btnRefresh = document.getElementById('btn-refresh');
+    btnRefresh.disabled = false;
+    btnRefresh.textContent = '⟳ Refresh';
+    if (error) {
+      setStatus('Error: ' + error);
+      document.getElementById('empty-msg').textContent = 'Error: ' + error;
+    } else {
+      const online = servers.filter(s => s.reachable).length;
+      setStatus('Loaded ' + servers.length + ' servers — ' + online + ' online.');
+    }
+    renderTable();
+    updateCounter();
+  }
+
+  // ── Connect / Disconnect ──────────────────────────────────────────────────
+  function connectServer(addr) {
+    if (info.privileged) {
+      pendingConnectAddr = addr;
+      document.getElementById('sudo-password').value = '';
+      document.getElementById('overlay-sudo').classList.add('open');
+      setTimeout(() => document.getElementById('sudo-password').focus(), 50);
+    } else {
+      doConnect(addr, null);
+    }
+  }
+
+  async function sudoConnect() {
+    const pw = document.getElementById('sudo-password').value;
+    if (!pw) return;
+    closeModal('overlay-sudo');
+    doConnect(pendingConnectAddr, pw);
+  }
+
+  async function doConnect(addr, sudoPw) {
+    setStatus('Connecting to ' + addr + '…');
+    try {
+      const body = { addr };
+      if (sudoPw) body.sudo_password = sudoPw;
+      const r = await fetch('/api/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setStatus('Connect failed: ' + (d.error || r.status));
+      } else {
+        connected     = true;
+        connectedAddr = addr;
+        setStatus('● Connected to ' + addr);
+        document.getElementById('status-msg').classList.add('status-connected');
+      }
+    } catch (e) {
+      setStatus('Connect error: ' + e.message);
+    }
+    renderSidePanel();
+  }
+
+  async function disconnectServer() {
+    try {
+      await fetch('/api/disconnect', { method: 'POST' });
+    } catch {}
+    connected     = false;
+    connectedAddr = null;
+    document.getElementById('status-msg').classList.remove('status-connected');
+    setStatus('Disconnected.');
+    renderSidePanel();
+  }
+
+  // ── Download binary ───────────────────────────────────────────────────────
+  async function downloadBinary() {
+    const el = document.getElementById('dl-status');
+    el.className = 'dl-status'; el.textContent = 'Starting download…';
+    try {
+      const r = await fetch('/api/download', { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        el.className = 'dl-status err'; el.textContent = d.error || 'Failed';
+      } else {
+        el.className = 'dl-status'; el.textContent = 'Downloading…';
+      }
+    } catch (e) {
+      el.className = 'dl-status err'; el.textContent = e.message;
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  function setStatus(msg) {
+    const el = document.getElementById('status-msg');
+    if (!connected) el.classList.remove('status-connected');
+    el.textContent = msg;
+  }
+
+  function pingClass(ms) {
+    if (ms === null || ms === undefined) return 'ping-none';
+    if (ms < 100)  return 'ping-good';
+    if (ms < 250)  return 'ping-warn';
+    return 'ping-bad';
+  }
+
+  function pingLabel(ms) {
+    return (ms === null || ms === undefined) ? '—' : ms + ' ms';
+  }
+
+  function updateCounter() {
+    const online = servers.filter(s => s.reachable).length;
+    document.getElementById('counter').textContent =
+      online + ' online / ' + servers.length + ' total';
+  }
+
+  function renderTable() {
+    const hideOffline = document.getElementById('hide-offline').checked;
+    const tbody   = document.getElementById('server-tbody');
+    const emptyMsg = document.getElementById('empty-msg');
+    const table   = document.getElementById('server-table');
+
+    let visible = servers
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => !hideOffline || s.reachable);
+
+    visible.sort((a, b) => {
+      if (a.s.reachable !== b.s.reachable) return a.s.reachable ? -1 : 1;
+      if (a.s.ping_ms != null && b.s.ping_ms != null) return a.s.ping_ms - b.s.ping_ms;
+      if (a.s.ping_ms != null) return -1;
+      if (b.s.ping_ms != null) return 1;
+      return 0;
+    });
+
+    if (visible.length === 0) {
+      table.style.display = 'none';
+      emptyMsg.style.display = 'flex';
+      emptyMsg.textContent = servers.length === 0
+        ? 'Click Refresh to load servers.'
+        : 'No servers match the current filter.';
+      return;
+    }
+
+    table.style.display = 'table';
+    emptyMsg.style.display = 'none';
+    tbody.innerHTML = '';
+
+    for (const { s, i } of visible) {
+      const online  = s.online  ?? s.client_count ?? '—';
+      const idle    = s.idle    ?? '—';
+      const active  = (typeof s.online === 'number' && typeof s.idle === 'number')
+        ? Math.max(0, s.online - s.idle)
+        : (typeof s.client_count === 'number' ? s.client_count : '—');
+      const version = s.version ?? '—';
+
+      const tr = document.createElement('tr');
+      tr.dataset.idx = i;
+      if (selected === i) tr.classList.add('selected');
+      tr.onclick = () => selectRow(i);
+
+      const statusClass = s.reachable ? 'dot-online' : 'dot-offline';
+      const statusDot   = s.reachable ? '● Online' : '○ Offline';
+      const pc = pingClass(s.ping_ms);
+
+      tr.innerHTML = `
+        <td>${escHtml(s.addr)}</td>
+        <td>${escHtml(s.server_type)}</td>
+        <td class="${statusClass}">${statusDot}</td>
+        <td>${escHtml(s.flag || '—')}</td>
+        <td>${escHtml(String(version))}</td>
+        <td>${escHtml(String(online))}</td>
+        <td>${escHtml(String(idle))}</td>
+        <td>${escHtml(String(active))}</td>
+        <td class="${pc}">${pingLabel(s.ping_ms)}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function selectRow(i) {
+    selected = i;
+    document.querySelectorAll('#server-tbody tr').forEach(tr => {
+      tr.classList.toggle('selected', parseInt(tr.dataset.idx) === i);
+    });
+    renderSidePanel();
+  }
+
+  function renderSidePanel() {
+    const el = document.getElementById('side-content');
+    if (selected === null || !servers[selected]) {
+      el.innerHTML = '<p class="hint-text">Select a server<br>to see details.</p>';
+      if (connected) {
+        el.innerHTML += `
+          <hr class="side-sep">
+          <div class="side-title" style="margin-top:0">Connection</div>
+          <div class="detail-row">
+            <span class="detail-label">Relay</span>
+            <span class="detail-value dot-online">${escHtml(connectedAddr || '?')}</span>
+          </div>
+          ${renderConsole()}
+          <button class="btn-disconnect" onclick="disconnectServer()">✕ Disconnect</button>
+        `;
+      }
+      return;
+    }
+
+    const s  = servers[selected];
+    const st = s;
+    const online  = st.online  ?? st.client_count ?? '—';
+    const idle    = st.idle    ?? '—';
+    const active  = (typeof st.online === 'number' && typeof st.idle === 'number')
+      ? Math.max(0, st.online - st.idle)
+      : (typeof st.client_count === 'number' ? st.client_count : '—');
+    const version = st.version ?? '—';
+    const statusLabel = s.reachable ? '● Online' : '○ Offline';
+    const statusClass = s.reachable ? 'dot-online' : 'dot-offline';
+    const pc  = pingClass(s.ping_ms);
+    const addr = s.addr;
+    const isConnectedHere = connected && connectedAddr === addr;
+
+    const connectBtn = isConnectedHere
+      ? `<button class="btn-disconnect" onclick="disconnectServer()">✕ Disconnect</button>`
+      : `<button class="btn-connect" onclick="connectServer('${escAttr(addr)}')"${connected ? ' disabled title="Already connected"' : ''}>▶ Connect</button>`;
+
+    el.innerHTML = `
+      ${detailRow('Address', escHtml(addr))}
+      ${detailRow('Type', escHtml(s.server_type))}
+      <div class="detail-row">
+        <span class="detail-label">Status</span>
+        <span class="detail-value ${statusClass}">${statusLabel}</span>
+      </div>
+      ${s.flag ? detailRow('Region', escHtml(s.flag)) : ''}
+      ${detailRow('Version', escHtml(String(version)))}
+      ${detailRow('Online', escHtml(String(online)))}
+      ${detailRow('Idle', escHtml(String(idle)))}
+      ${detailRow('Active', escHtml(String(active)))}
+      <div class="detail-row">
+        <span class="detail-label">Ping</span>
+        <span class="detail-value ${pc}">${pingLabel(s.ping_ms)}</span>
+      </div>
+      <hr class="side-sep">
+      ${connectBtn}
+      <button class="btn-copy" style="margin-top:6px" id="btn-copy" onclick="copyAddr('${escAttr(addr)}')">⧉ Copy Address</button>
+      ${isConnectedHere ? renderConsole() : ''}
+    `;
+  }
+
+  function renderConsole() {
+    return ''; // Console content is filled by poll via updateConnectionUI
+  }
+
+  function detailRow(label, value) {
+    return `<div class="detail-row">
+      <span class="detail-label">${label}</span>
+      <span class="detail-value">${value}</span>
+    </div>`;
+  }
+
+  function copyAddr(addr) {
+    navigator.clipboard.writeText(addr).then(() => {
+      const btn = document.getElementById('btn-copy');
+      if (!btn) return;
+      btn.textContent = '✓ Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = '⧉ Copy Address';
+        btn.classList.remove('copied');
+      }, 1500);
+    });
+  }
+
+  // ── Quick Connect ─────────────────────────────────────────────────────────
+  function openQuickConnect() {
+    document.getElementById('qc-addr').value = '';
+    document.getElementById('overlay-quickconnect').classList.add('open');
+    setTimeout(() => document.getElementById('qc-addr').focus(), 50);
+  }
+
+  function quickConnectSubmit() {
+    const addr = document.getElementById('qc-addr').value.trim();
+    if (!addr) return;
+    closeModal('overlay-quickconnect');
+    connectServer(addr);
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  function openSettings() {
+    document.getElementById('cfg-url').value        = cfg.url;
+    document.getElementById('cfg-timeout').value    = cfg.timeout;
+    document.getElementById('cfg-clientdir').value  = cfg.clientDir;
+    document.getElementById('cfg-parammode').value  = cfg.paramMode;
+    document.getElementById('cfg-customparam').value= cfg.customParams;
+    // Show/hide conditional rows
+    document.getElementById('row-customparam').style.display =
+      cfg.paramMode === 'Custom' ? 'flex' : 'none';
+
+    // Reset download status
+    document.getElementById('dl-status').textContent = '';
+    document.getElementById('dl-status').className = 'dl-status';
+
+    document.getElementById('overlay-settings').classList.add('open');
+  }
+
+  async function saveSettings() {
+    const paramMode = document.getElementById('cfg-parammode').value;
+    const newCfg = {
+      server_list_url: document.getElementById('cfg-url').value.trim() || cfg.url,
+      http_timeout_ms: parseInt(document.getElementById('cfg-timeout').value) || 500,
+      client_dir:      document.getElementById('cfg-clientdir').value.trim(),
+      param_mode:      paramMode,
+      custom_params:   document.getElementById('cfg-customparam').value.trim(),
+    };
+    if (info.platform !== 'windows') {
+      newCfg.privileged = true;
+    }
+
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newCfg),
+      });
+      cfg.url          = newCfg.server_list_url;
+      cfg.timeout      = newCfg.http_timeout_ms;
+      cfg.clientDir    = newCfg.client_dir;
+      cfg.paramMode    = newCfg.param_mode;
+      cfg.customParams = newCfg.custom_params;
+      if (info.platform !== 'windows') cfg.privileged = true;
+      setStatus('Settings saved.');
+    } catch (e) {
+      setStatus('Failed to save settings: ' + e.message);
+    }
+    closeModal('overlay-settings');
+  }
+
+  function setPreset(url) {
+    document.getElementById('cfg-url').value = url;
+  }
+
+  // Toggle custom params input visibility
+  document.addEventListener('change', e => {
+    if (e.target.id === 'cfg-parammode') {
+      document.getElementById('row-customparam').style.display =
+        e.target.value === 'Custom' ? 'flex' : 'none';
+    }
+  });
+
+  // ── About ─────────────────────────────────────────────────────────────────
+  function openAbout() {
+    document.getElementById('overlay-about').classList.add('open');
+  }
+
+  // ── Modal helpers ─────────────────────────────────────────────────────────
+  function closeModal(id) {
+    document.getElementById(id).classList.remove('open');
+  }
+
+  document.querySelectorAll('.overlay').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target === el) el.classList.remove('open');
+    });
+  });
+
+  // ── XSS helpers ──────────────────────────────────────────────────────────
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+  function escAttr(s) {
+    return String(s).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>

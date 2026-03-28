@@ -1,8 +1,10 @@
 use std::io;
 use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
-use serde_json::Value;
-use crate::models::{AppSettings, Server, ServerEntry, ServerStatus};
+use yaslp_shared::{AppSettings, ServerEntry, ServerStatus};
+use yaslp_shared::parse::{download_url, parse_server_list};
+
+use crate::models::Server;
 
 /// Build a single shared client. Call once per refresh cycle.
 pub fn build_client(timeout_ms: u64) -> Result<Client, String> {
@@ -31,46 +33,9 @@ pub fn fetch_server_list(cfg: &AppSettings) -> Result<Vec<ServerEntry>, String> 
     parse_server_list(&body)
 }
 
-fn parse_server_list(body: &str) -> Result<Vec<ServerEntry>, String> {
-    let v: Value = serde_json::from_str(body).map_err(|e| format!("JSON parse error: {e}"))?;
-
-    // Format 1: [{"servers": [...]}]
-    if let Some(arr) = v.as_array() {
-        if let Some(first) = arr.first() {
-            if let Some(servers) = first.get("servers") {
-                if let Ok(list) = serde_json::from_value::<Vec<ServerEntry>>(servers.clone()) {
-                    return Ok(list);
-                }
-            }
-        }
-        // Format 2: flat array [{ip, port, ...}, ...]
-        if let Ok(list) = serde_json::from_value::<Vec<ServerEntry>>(v.clone()) {
-            return Ok(list);
-        }
-    }
-
-    // Format 3: {"servers": [...]}
-    if let Some(servers) = v.get("servers") {
-        if let Ok(list) = serde_json::from_value::<Vec<ServerEntry>>(servers.clone()) {
-            return Ok(list);
-        }
-    }
-
-    Err("Unrecognized server list format".into())
-}
-
 /// Download the lan-play binary for the current platform to `dest_path`.
-/// The directory is created if it does not exist.
-/// On Unix, the file is made executable after writing.
 pub fn download_binary(dest_path: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let url = "https://github.com/spacemeowx2/switch-lan-play/releases/latest/download/lan-play-win64.exe";
-    #[cfg(target_os = "macos")]
-    let url = "https://github.com/spacemeowx2/switch-lan-play/releases/latest/download/lan-play-macos";
-    #[cfg(all(not(any(target_os = "windows", target_os = "macos")), any(target_arch = "aarch64", target_arch = "arm")))]
-    let url = "https://github.com/metehankaygsz/lan-play-arm/releases/latest/download/lan-play-arm";
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_arch = "aarch64", target_arch = "arm")))]
-    let url = "https://github.com/spacemeowx2/switch-lan-play/releases/latest/download/lan-play-linux";
+    let url = download_url();
 
     if let Some(parent) = std::path::Path::new(dest_path).parent() {
         if !parent.as_os_str().is_empty() {
