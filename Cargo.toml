@@ -1,0 +1,32 @@
+[package]
+name = "yaslp-gui"
+version = "1.0.0"
+edition = "2021"
+description = "Yet another Switch LAN Play GUI - Cross-platform Rust rewrite"
+license = "GPL-3.0"
+
+[[bin]]
+name = "yaslp-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["default"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+rayon = "1"
+rfd = "0.15"
+
+[target.'cfg(unix)'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "accesskit", "wayland", "x11"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
