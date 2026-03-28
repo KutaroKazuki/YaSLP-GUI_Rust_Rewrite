@@ -533,8 +533,8 @@ async fn main() {
         .with_state(state);
 
     let ip = local_ip().unwrap_or_else(|| "127.0.0.1".into());
-    let addr = format!("{ip}:{port}");
-    println!("YaSLP-Web listening on http://{addr}");
+    let addr = format!("0.0.0.0:{port}");
+    println!("YaSLP-Web listening on http://{ip}:{port}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind");
     axum::serve(listener, app).await.expect("Server error");
