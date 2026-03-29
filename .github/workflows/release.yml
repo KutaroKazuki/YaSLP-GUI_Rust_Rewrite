@@ -125,22 +125,24 @@ jobs:
 
       - name: Create release
         if: steps.check.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
-          body: |
-            ${{ steps.version.outputs.changelog }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release_notes.md << 'EOF'
+          ${{ steps.version.outputs.changelog }}
 
-            ## Downloads
-            | File | Platform |
-            |------|----------|
-            | `yaslp-gui-linux-x86_64` | Linux x86_64 (desktop GUI) |
-            | `yaslp-gui-linux-armv7` | Linux ARMv7 (desktop GUI) |
-            | `yaslp-gui-linux-aarch64` | Linux AArch64 (desktop GUI) |
-            | `yaslp-gui-windows-x86_64.exe` | Windows x86_64 (desktop GUI) |
-            | `yaslp-web-linux-x86_64` | Linux x86_64 (web server) |
-            | `yaslp-web-linux-armv7` | Linux ARMv7 (web server) |
-            | `yaslp-web-linux-aarch64` | Linux AArch64 (web server) |
-            | `yaslp-web-windows-x86_64.exe` | Windows x86_64 (web server) |
-          files: dist/*
+          ## Downloads
+          | File | Platform |
+          |------|----------|
+          | `yaslp-gui-linux-x86_64` | Linux x86_64 (desktop GUI) |
+          | `yaslp-gui-linux-armv7` | Linux ARMv7 (desktop GUI) |
+          | `yaslp-gui-linux-aarch64` | Linux AArch64 (desktop GUI) |
+          | `yaslp-gui-windows-x86_64.exe` | Windows x86_64 (desktop GUI) |
+          | `yaslp-web-linux-x86_64` | Linux x86_64 (web server) |
+          | `yaslp-web-linux-armv7` | Linux ARMv7 (web server) |
+          | `yaslp-web-linux-aarch64` | Linux AArch64 (web server) |
+          | `yaslp-web-windows-x86_64.exe` | Windows x86_64 (web server) |
+          EOF
+          gh release create "${{ steps.version.outputs.tag }}" dist/* \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file release_notes.md
