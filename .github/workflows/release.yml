@@ -2,12 +2,10 @@ name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g. v1.3.4)'
-        required: true
 
 jobs:
   build:
@@ -18,16 +16,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve tag
-        id: tag
+      - name: Get version from Cargo.toml
+        id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
           else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "exists=false" >> $GITHUB_OUTPUT
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cross-compilation toolchains
+        if: steps.check.outputs.exists == 'false'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -36,6 +44,7 @@ jobs:
             mingw-w64
 
       - name: Install Rust toolchain
+        if: steps.check.outputs.exists == 'false'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: >
@@ -45,6 +54,7 @@ jobs:
             x86_64-pc-windows-gnu
 
       - name: Cache Cargo registry
+        if: steps.check.outputs.exists == 'false'
         uses: actions/cache@v4
         with:
           path: |
@@ -55,11 +65,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build x86_64 Linux
+        if: steps.check.outputs.exists == 'false'
         run: |
           cargo build --release --target x86_64-unknown-linux-gnu --package yaslp-gui
           cargo build --release --target x86_64-unknown-linux-gnu --package yaslp-web
 
       - name: Build ARMv7 Linux
+        if: steps.check.outputs.exists == 'false'
         env:
           PKG_CONFIG_ALLOW_CROSS: "1"
           PKG_CONFIG_SYSROOT_DIR: "/"
@@ -71,6 +83,7 @@ jobs:
           cargo build --release --target armv7-unknown-linux-gnueabihf --package yaslp-web
 
       - name: Build AArch64 Linux
+        if: steps.check.outputs.exists == 'false'
         env:
           PKG_CONFIG_ALLOW_CROSS: "1"
           PKG_CONFIG_SYSROOT_DIR: "/"
@@ -82,27 +95,30 @@ jobs:
           cargo build --release --target aarch64-unknown-linux-gnu --package yaslp-web
 
       - name: Build Windows x86_64
+        if: steps.check.outputs.exists == 'false'
         run: |
           cargo build --release --target x86_64-pc-windows-gnu --package yaslp-gui
           cargo build --release --target x86_64-pc-windows-gnu --package yaslp-web
 
       - name: Collect binaries
+        if: steps.check.outputs.exists == 'false'
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-gnu/release/yaslp-gui     dist/yaslp-gui-linux-x86_64
-          cp target/x86_64-unknown-linux-gnu/release/yaslp-web     dist/yaslp-web-linux-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/yaslp-gui      dist/yaslp-gui-linux-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/yaslp-web      dist/yaslp-web-linux-x86_64
           cp target/armv7-unknown-linux-gnueabihf/release/yaslp-gui dist/yaslp-gui-linux-armv7
           cp target/armv7-unknown-linux-gnueabihf/release/yaslp-web dist/yaslp-web-linux-armv7
-          cp target/aarch64-unknown-linux-gnu/release/yaslp-gui    dist/yaslp-gui-linux-aarch64
-          cp target/aarch64-unknown-linux-gnu/release/yaslp-web    dist/yaslp-web-linux-aarch64
-          cp target/x86_64-pc-windows-gnu/release/yaslp-gui.exe   dist/yaslp-gui-windows-x86_64.exe
-          cp target/x86_64-pc-windows-gnu/release/yaslp-web.exe   dist/yaslp-web-windows-x86_64.exe
+          cp target/aarch64-unknown-linux-gnu/release/yaslp-gui     dist/yaslp-gui-linux-aarch64
+          cp target/aarch64-unknown-linux-gnu/release/yaslp-web     dist/yaslp-web-linux-aarch64
+          cp target/x86_64-pc-windows-gnu/release/yaslp-gui.exe    dist/yaslp-gui-windows-x86_64.exe
+          cp target/x86_64-pc-windows-gnu/release/yaslp-web.exe    dist/yaslp-web-windows-x86_64.exe
 
       - name: Create release
+        if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           body: |
             ## Downloads
             | File | Platform |
