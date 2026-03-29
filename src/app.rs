@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "windows"))]
 use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -111,11 +111,20 @@ pub struct YaSLPApp {
 
     // Running lan-play process
     lan_play_child: Option<Child>,
+    /// Elevated process handle (Windows only, from ShellExecuteExW with runas).
+    #[cfg(target_os = "windows")]
+    lan_play_elevated_handle: Option<isize>,
+    /// Job object that contains cmd.exe + lan-play; TerminateJobObject kills both.
+    #[cfg(target_os = "windows")]
+    lan_play_job_handle: Option<isize>,
 
     // Console output window
     show_console: bool,
     console_cmd: String,
     console_output: Arc<Mutex<String>>,
+    /// Length (bytes) of console_output the last time we rendered — used to
+    /// detect new content so we can auto-scroll to bottom only then.
+    console_last_len: usize,
 
     // Privileged (sudo) run state — Linux only
     #[cfg(not(target_os = "windows"))]
@@ -155,9 +164,14 @@ impl Default for YaSLPApp {
             dl_bg: None,
             pcap_ok: check_pcap(),
             lan_play_child: None,
+            #[cfg(target_os = "windows")]
+            lan_play_elevated_handle: None,
+            #[cfg(target_os = "windows")]
+            lan_play_job_handle: None,
             show_console: false,
             console_cmd: String::new(),
             console_output: Arc::new(Mutex::new(String::new())),
+            console_last_len: 0,
             #[cfg(not(target_os = "windows"))]
             show_sudo_dialog: false,
             #[cfg(not(target_os = "windows"))]
@@ -452,7 +466,7 @@ impl YaSLPApp {
                         ui.add(egui::Separator::default());
                         ui.add_space(10.0);
 
-                        if self.lan_play_child.is_some() {
+                        if self.is_connected() {
                             let btn = egui::Button::new(
                                 RichText::new("■  Disconnect")
                                     .font(FontId::proportional(14.0))
@@ -627,6 +641,14 @@ impl YaSLPApp {
                             );
                         });
                         ui.end_row();
+
+                        // Run as Administrator (Windows only)
+                        #[cfg(target_os = "windows")]
+                        {
+                            ui.label(RichText::new("Run as Administrator").color(C_TEXT));
+                            ui.checkbox(&mut self.edit.privileged, "UAC prompt on connect (recommended)");
+                            ui.end_row();
+                        }
 
                         // Custom params
                         if self.edit.param_mode == ParamMode::Custom {
@@ -904,6 +926,13 @@ impl YaSLPApp {
         }
     }
 
+    fn is_connected(&self) -> bool {
+        if self.lan_play_child.is_some() { return true; }
+        #[cfg(target_os = "windows")]
+        if self.lan_play_elevated_handle.is_some() { return true; }
+        false
+    }
+
     // ── Connect to a relay server ────────────────────────────────────────────
 
     fn connect_to(&mut self, addr: &str, ctx: &egui::Context) {
@@ -915,6 +944,9 @@ impl YaSLPApp {
         }
         lan_args.push("--relay-server-addr".into());
         lan_args.push(addr.to_string());
+        // Disable C-runtime buffering on stdout/stderr so output arrives
+        // immediately even when lan-play's stdout/stderr is a pipe, not a TTY.
+        lan_args.push("--set-ionbf".into());
 
         #[cfg(not(target_os = "windows"))]
         if self.settings.privileged {
@@ -922,6 +954,12 @@ impl YaSLPApp {
             self.pending_connect_addr = addr.to_string();
             self.sudo_password.clear();
             self.show_sudo_dialog = true;
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if self.settings.privileged {
+            let cmd_display = format!("{} {}", binary, lan_args.join(" "));
+            self.spawn_elevated_windows(binary, lan_args, cmd_display, ctx);
             return;
         }
         let cmd_display = format!("{} {}", binary, lan_args.join(" "));
@@ -935,12 +973,17 @@ impl YaSLPApp {
         cmd_display: String,
         ctx: &egui::Context,
     ) {
-        match Command::new(&exe)
-            .args(&args)
+        let mut cmd = Command::new(&exe);
+        cmd.args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        match cmd.spawn()
         {
             Ok(mut child) => {
                 let output = Arc::new(Mutex::new(String::new()));
@@ -953,10 +996,16 @@ impl YaSLPApp {
                     let out = output.clone();
                     let ctx2 = ctx.clone();
                     thread::spawn(move || {
-                        for line in BufReader::new(stdout).lines() {
-                            if let Ok(line) = line {
-                                if let Ok(mut g) = out.lock() { g.push_str(&line); g.push('\n'); }
-                                ctx2.request_repaint();
+                        let mut reader = BufReader::new(stdout);
+                        let mut buf = vec![0u8; 1024];
+                        loop {
+                            match reader.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let s = String::from_utf8_lossy(&buf[..n]);
+                                    if let Ok(mut g) = out.lock() { g.push_str(&s); }
+                                    ctx2.request_repaint();
+                                }
                             }
                         }
                     });
@@ -967,10 +1016,16 @@ impl YaSLPApp {
                     let out = output.clone();
                     let ctx2 = ctx.clone();
                     thread::spawn(move || {
-                        for line in BufReader::new(stderr).lines() {
-                            if let Ok(line) = line {
-                                if let Ok(mut g) = out.lock() { g.push_str(&line); g.push('\n'); }
-                                ctx2.request_repaint();
+                        let mut reader = BufReader::new(stderr);
+                        let mut buf = vec![0u8; 1024];
+                        loop {
+                            match reader.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let s = String::from_utf8_lossy(&buf[..n]);
+                                    if let Ok(mut g) = out.lock() { g.push_str(&s); }
+                                    ctx2.request_repaint();
+                                }
                             }
                         }
                     });
@@ -984,6 +1039,147 @@ impl YaSLPApp {
                 self.status_msg = format!("Failed to launch: {e}");
             }
         }
+    }
+
+    // ── Elevated (RunAs) connect — Windows only ──────────────────────────────
+
+    #[cfg(target_os = "windows")]
+    fn spawn_elevated_windows(
+        &mut self,
+        exe: String,
+        args: Vec<String>,
+        cmd_display: String,
+        ctx: &egui::Context,
+    ) {
+        use std::io::BufReader;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE, TRUE};
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW};
+        use windows_sys::Win32::UI::Shell::{
+            ShellExecuteExW, SHELLEXECUTEINFOW, SHELLEXECUTEINFOW_0,
+        };
+
+        static PIPE_COUNTER: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+
+        fn to_wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        // Unique named pipe for this launch so we can read stdout/stderr
+        let pipe_id = PIPE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let pipe_name = format!("\\\\.\\pipe\\yaslp_{}_{}", std::process::id(), pipe_id);
+        let wide_pipe = to_wide(&pipe_name);
+
+        let pipe_handle = unsafe {
+            CreateNamedPipeW(
+                wide_pipe.as_ptr(),
+                0x00000001, // PIPE_ACCESS_INBOUND
+                0x00000000, // PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT
+                1,          // nMaxInstances
+                4096,
+                4096,
+                0,                                        // default timeout
+                std::ptr::null::<SECURITY_ATTRIBUTES>(), // default security descriptor
+            )
+        };
+
+        if pipe_handle == INVALID_HANDLE_VALUE {
+            self.status_msg = "Failed to create output pipe.".into();
+            return;
+        }
+
+        // Create a job object so TerminateJobObject kills cmd.exe + lan-play together
+        let job_handle = unsafe {
+            CreateJobObjectW(std::ptr::null::<SECURITY_ATTRIBUTES>(), std::ptr::null())
+        };
+
+        // Build: cmd.exe /c "<exe> <args> > \\.\pipe\... 2>&1"
+        let exe_quoted = if exe.contains(' ') {
+            format!("\"{}\"", exe)
+        } else {
+            exe.clone()
+        };
+        let args_str = args
+            .iter()
+            .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.clone() })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd_params = format!("/c \"{} {} > {} 2>&1\"", exe_quoted, args_str, pipe_name);
+
+        let verb = to_wide("runas");
+        let cmd_exe = to_wide("cmd.exe");
+        let params_wide = to_wide(&cmd_params);
+
+        let mut sei = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: 0x00000040, // SEE_MASK_NOCLOSEPROCESS
+            hwnd: 0,
+            lpVerb: verb.as_ptr(),
+            lpFile: cmd_exe.as_ptr(),
+            lpParameters: params_wide.as_ptr(),
+            lpDirectory: std::ptr::null(),
+            nShow: 0, // SW_HIDE
+            hInstApp: 0,
+            lpIDList: std::ptr::null_mut(),
+            lpClass: std::ptr::null(),
+            hkeyClass: 0,
+            dwHotKey: 0,
+            Anonymous: SHELLEXECUTEINFOW_0 { hIcon: 0 },
+            hProcess: 0,
+        };
+
+        let ok = unsafe { ShellExecuteExW(&mut sei) };
+
+        if ok == TRUE {
+            let output = Arc::new(Mutex::new(String::new()));
+            self.console_output = output.clone();
+            self.console_cmd = cmd_display;
+            self.show_console = true;
+
+            // Reader thread: wait for cmd.exe to connect the pipe then stream output
+            let ctx2 = ctx.clone();
+            thread::spawn(move || {
+                unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) };
+                let raw = pipe_handle as usize as *mut std::ffi::c_void;
+                let file = unsafe { std::fs::File::from_raw_handle(raw) };
+                let mut reader = BufReader::new(file);
+                let mut buf = vec![0u8; 1024];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let s = String::from_utf8_lossy(&buf[..n]);
+                            if let Ok(mut g) = output.lock() { g.push_str(&s); }
+                            ctx2.request_repaint();
+                        }
+                    }
+                }
+            });
+
+            // Assign cmd.exe (and by inheritance, lan-play) to the job so
+            // TerminateJobObject kills the entire tree on disconnect.
+            if job_handle != 0 {
+                unsafe { AssignProcessToJobObject(job_handle, sei.hProcess) };
+                self.lan_play_job_handle = Some(job_handle);
+            }
+
+            let addr = args.last().cloned().unwrap_or_default();
+            self.lan_play_elevated_handle = Some(sei.hProcess);
+            self.status_msg = format!("Connected to {addr} (Administrator)");
+        } else {
+            unsafe { CloseHandle(pipe_handle) };
+            let err = unsafe { GetLastError() };
+            if err == 1223 {
+                // ERROR_CANCELLED — user dismissed UAC prompt
+                self.status_msg = "Administrator prompt cancelled.".into();
+            } else {
+                self.status_msg = format!("Failed to start as Administrator (error {err}).");
+            }
+        }
+        ctx.request_repaint();
     }
 
     // ── Privileged (sudo) connect — Linux only ───────────────────────────────
@@ -1053,9 +1249,17 @@ impl YaSLPApp {
                     let out = output.clone();
                     let ctx2 = ctx.clone();
                     thread::spawn(move || {
-                        for line in BufReader::new(stdout).lines().flatten() {
-                            if let Ok(mut g) = out.lock() { g.push_str(&line); g.push('\n'); }
-                            ctx2.request_repaint();
+                        let mut reader = BufReader::new(stdout);
+                        let mut buf = vec![0u8; 1024];
+                        loop {
+                            match reader.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let s = String::from_utf8_lossy(&buf[..n]);
+                                    if let Ok(mut g) = out.lock() { g.push_str(&s); }
+                                    ctx2.request_repaint();
+                                }
+                            }
                         }
                     });
                 }
@@ -1063,9 +1267,17 @@ impl YaSLPApp {
                     let out = output.clone();
                     let ctx2 = ctx.clone();
                     thread::spawn(move || {
-                        for line in BufReader::new(stderr).lines().flatten() {
-                            if let Ok(mut g) = out.lock() { g.push_str(&line); g.push('\n'); }
-                            ctx2.request_repaint();
+                        let mut reader = BufReader::new(stderr);
+                        let mut buf = vec![0u8; 1024];
+                        loop {
+                            match reader.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let s = String::from_utf8_lossy(&buf[..n]);
+                                    if let Ok(mut g) = out.lock() { g.push_str(&s); }
+                                    ctx2.request_repaint();
+                                }
+                            }
                         }
                     });
                 }
@@ -1144,6 +1356,7 @@ impl YaSLPApp {
             }
             lan_args.push("--relay-server-addr".into());
             lan_args.push(addr);
+            lan_args.push("--set-ionbf".into());
             let password = std::mem::take(&mut self.sudo_password);
             self.show_sudo_dialog = false;
             ctx.request_repaint();
@@ -1156,6 +1369,26 @@ impl YaSLPApp {
     }
 
     fn disconnect(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        if let Some(proc_handle) = self.lan_play_elevated_handle.take() {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::TerminateProcess;
+            unsafe {
+                // Prefer the job handle: TerminateJobObject kills cmd.exe AND lan-play.
+                // Fall back to TerminateProcess (kills cmd.exe only) if job wasn't created.
+                if let Some(job) = self.lan_play_job_handle.take() {
+                    windows_sys::Win32::System::JobObjects::TerminateJobObject(job, 1);
+                    CloseHandle(job);
+                } else {
+                    TerminateProcess(proc_handle, 1);
+                }
+                CloseHandle(proc_handle);
+            }
+            self.status_msg = "Disconnected.".into();
+            self.show_console = false;
+            ctx.request_repaint();
+            return;
+        }
         if let Some(mut child) = self.lan_play_child.take() {
             #[cfg(not(target_os = "windows"))]
             if let Some(password) = self.sudo_password_for_kill.take() {
@@ -1272,10 +1505,14 @@ impl YaSLPApp {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
 
+                // Detect new content so we can auto-scroll only when output grows.
+                let new_content = output.len() != self.console_last_len;
+                self.console_last_len = output.len();
+
                 let available = ui.available_size();
                 egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .max_height(available.y)
+                    .auto_shrink([false, false])
+                    .max_height(available.y - 4.0)
                     .show(ui, |ui| {
                         let mut text = output.as_str();
                         ui.add(
@@ -1285,6 +1522,16 @@ impl YaSLPApp {
                                 .interactive(false)
                                 .text_color(C_TEXT),
                         );
+                        // Scroll to the layout cursor (end of content) whenever
+                        // new output arrives. Between bursts the user can scroll
+                        // up freely.
+                        if new_content {
+                            let bottom = ui.min_rect().max;
+                            ui.scroll_to_rect(
+                                egui::Rect::from_min_size(bottom, egui::Vec2::ZERO),
+                                Some(Align::BOTTOM),
+                            );
+                        }
                     });
             });
         // Only allow the X button to close; never restore true from open.

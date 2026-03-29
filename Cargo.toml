@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "yaslp-gui"
-version = "1.1.4"
+version = "1.2.0"
 edition = "2024"
 description = "Yet another Switch LAN Play GUI - Cross-platform Rust rewrite"
 license = "GPL-3.0"
@@ -30,6 +30,17 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+windows-sys = { version = "0.52", features = [
+    "Win32_UI_Shell",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+] }
 
 # Release profile applies to all workspace members
 [profile.release]

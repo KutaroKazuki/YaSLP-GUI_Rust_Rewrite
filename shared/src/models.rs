@@ -72,9 +72,8 @@ pub struct AppSettings {
     pub client_dir: String,
     pub param_mode: ParamMode,
     pub custom_params: String,
-    /// Run lan-play via sudo so it can access raw network interfaces (Linux only).
-    #[cfg(not(target_os = "windows"))]
-    #[serde(default)]
+    /// Run lan-play with elevated privileges (sudo on Linux, UAC RunAs on Windows).
+    #[serde(default = "default_true")]
     pub privileged: bool,
 }
 
@@ -85,6 +84,8 @@ pub enum ParamMode {
     Custom,
 }
 
+fn default_true() -> bool { true }
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -93,7 +94,6 @@ impl Default for AppSettings {
             client_dir: default_client_dir(),
             param_mode: ParamMode::Default,
             custom_params: String::new(),
-            #[cfg(not(target_os = "windows"))]
             privileged: true,
         }
     }
@@ -134,7 +134,7 @@ fn default_client_dir() -> String {
     #[cfg(not(target_os = "windows"))]
     {
         dirs::home_dir()
-            .map(|p| format!("{}/lan-play", p.display()))
-            .unwrap_or_else(|| "/opt/lan-play".into())
+            .map(|p| format!("{}/YaSLP-GUI", p.display()))
+            .unwrap_or_else(|| "/opt/YaSLP-GUI".into())
     }
 }
