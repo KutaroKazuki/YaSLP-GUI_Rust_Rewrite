@@ -208,7 +208,17 @@ pub struct YaSLPApp {
 
 impl Default for YaSLPApp {
     fn default() -> Self {
+        let config_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("config.json");
+        let first_run = !config_path.exists();
         let settings = cfg_store::load();
+        if first_run && !settings.client_dir.is_empty() {
+            let _ = std::fs::create_dir_all(&settings.client_dir);
+            cfg_store::save(&settings);
+        }
         let edit = settings.clone();
         Self {
             settings,
@@ -723,7 +733,24 @@ impl YaSLPApp {
                                     .desired_width(260.0),
                             );
                             if ui.add(accent_button("Browse…")).clicked() {
-                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                let mut dialog = rfd::FileDialog::new();
+                                if !self.edit.client_dir.is_empty() {
+                                    // Walk up to the nearest existing ancestor so the
+                                    // dialog always opens somewhere sensible even if
+                                    // the configured directory does not exist yet.
+                                    let mut p = std::path::Path::new(&self.edit.client_dir);
+                                    loop {
+                                        if p.exists() {
+                                            dialog = dialog.set_directory(p);
+                                            break;
+                                        }
+                                        match p.parent() {
+                                            Some(parent) if !parent.as_os_str().is_empty() => p = parent,
+                                            _ => break,
+                                        }
+                                    }
+                                }
+                                if let Some(path) = dialog.pick_folder() {
                                     self.edit.client_dir = path.display().to_string();
                                 }
                             }
