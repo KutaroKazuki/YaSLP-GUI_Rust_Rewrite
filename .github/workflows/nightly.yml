@@ -1,0 +1,99 @@
+name: Nightly Build
+
+on:
+  push:
+    branches: [main, GUI_and_Web]
+    tags-ignore: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compilation toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            gcc-aarch64-linux-gnu \
+            mingw-w64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >
+            x86_64-unknown-linux-gnu,
+            armv7-unknown-linux-gnueabihf,
+            aarch64-unknown-linux-gnu,
+            x86_64-pc-windows-gnu
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build x86_64 Linux
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu --package yaslp-gui
+          cargo build --release --target x86_64-unknown-linux-gnu --package yaslp-web
+
+      - name: Build ARMv7 Linux
+        env:
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_SYSROOT_DIR: "/"
+          CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+          CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+          AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+        run: |
+          cargo build --release --target armv7-unknown-linux-gnueabihf --package yaslp-gui
+          cargo build --release --target armv7-unknown-linux-gnueabihf --package yaslp-web
+
+      - name: Build AArch64 Linux
+        env:
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_SYSROOT_DIR: "/"
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu --package yaslp-gui
+          cargo build --release --target aarch64-unknown-linux-gnu --package yaslp-web
+
+      - name: Build Windows x86_64
+        run: |
+          cargo build --release --target x86_64-pc-windows-gnu --package yaslp-gui
+          cargo build --release --target x86_64-pc-windows-gnu --package yaslp-web
+
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/yaslp-gui     dist/yaslp-gui-linux-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/yaslp-web     dist/yaslp-web-linux-x86_64
+          cp target/armv7-unknown-linux-gnueabihf/release/yaslp-gui dist/yaslp-gui-linux-armv7
+          cp target/armv7-unknown-linux-gnueabihf/release/yaslp-web dist/yaslp-web-linux-armv7
+          cp target/aarch64-unknown-linux-gnu/release/yaslp-gui    dist/yaslp-gui-linux-aarch64
+          cp target/aarch64-unknown-linux-gnu/release/yaslp-web    dist/yaslp-web-linux-aarch64
+          cp target/x86_64-pc-windows-gnu/release/yaslp-gui.exe   dist/yaslp-gui-windows-x86_64.exe
+          cp target/x86_64-pc-windows-gnu/release/yaslp-web.exe   dist/yaslp-web-windows-x86_64.exe
+
+      - name: Update nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          prerelease: true
+          body: |
+            Automated nightly build from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+
+            > These builds are not stable releases. Use a versioned release for production.
+          files: dist/*
