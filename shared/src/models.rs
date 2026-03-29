@@ -142,7 +142,7 @@ fn default_client_dir() -> String {
     #[cfg(not(target_os = "windows"))]
     {
         dirs::home_dir()
-            .map(|p| format!("{}/YaSLP-GUI", p.display()))
+            .map(|p| format!("{}/.config/YaSLP-GUI", p.display()))
             .unwrap_or_else(|| "/opt/YaSLP-GUI".into())
     }
 }

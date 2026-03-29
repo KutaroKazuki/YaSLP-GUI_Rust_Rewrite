@@ -208,11 +208,15 @@ pub struct YaSLPApp {
 
 impl Default for YaSLPApp {
     fn default() -> Self {
-        let config_path = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("config.json");
+        let config_path = {
+            #[cfg(target_os = "windows")]
+            let base = std::path::PathBuf::from("C:\\YaSLP-GUI");
+            #[cfg(not(target_os = "windows"))]
+            let base = dirs::home_dir()
+                .map(|p| p.join(".config/YaSLP-GUI"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/opt/YaSLP-GUI"));
+            base.join("config.json")
+        };
         let first_run = !config_path.exists();
         let settings = cfg_store::load();
         if first_run && !settings.client_dir.is_empty() {

@@ -1,6 +1,6 @@
 [package]
 name = "yaslp-web"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2024"
 description = "Yet another Switch LAN Play GUI - Web Edition"
 license = "GPL-3.0"

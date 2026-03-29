@@ -2,12 +2,24 @@ use std::fs;
 use std::path::PathBuf;
 use crate::models::AppSettings;
 
+/// Returns the directory where config.json is stored.
+/// This is the default client directory so that the config lives
+/// alongside the lan-play binary on a default install.
+fn config_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from("C:\\YaSLP-GUI")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::home_dir()
+            .map(|p| p.join(".config/YaSLP-GUI"))
+            .unwrap_or_else(|| PathBuf::from("/opt/YaSLP-GUI"))
+    }
+}
+
 fn config_path() -> PathBuf {
-    let base = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("config.json")
+    config_dir().join("config.json")
 }
 
 pub fn load() -> AppSettings {
