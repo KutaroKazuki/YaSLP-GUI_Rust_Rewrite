@@ -75,6 +75,12 @@ pub struct AppSettings {
     /// Run lan-play with elevated privileges (sudo on Linux, UAC RunAs on Windows).
     #[serde(default = "default_true")]
     pub privileged: bool,
+    /// Whether to pass --netif to lan-play.
+    #[serde(default)]
+    pub use_netif: bool,
+    /// The pcap device name to pass as --netif (e.g. "eth0" or "\Device\NPF_{GUID}").
+    #[serde(default)]
+    pub netif: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -95,6 +101,8 @@ impl Default for AppSettings {
             param_mode: ParamMode::Default,
             custom_params: String::new(),
             privileged: true,
+            use_netif: false,
+            netif: String::new(),
         }
     }
 }

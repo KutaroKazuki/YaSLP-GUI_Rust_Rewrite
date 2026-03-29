@@ -41,4 +41,12 @@ impl ServerView {
         self.ping_ms = Some(ping_ms);
         self.reachable = true;
     }
+
+    pub fn status_url(&self) -> String {
+        if self.server_type == "dotnet" {
+            format!("http://{}/", self.addr)
+        } else {
+            format!("http://{}/info", self.addr)
+        }
+    }
 }

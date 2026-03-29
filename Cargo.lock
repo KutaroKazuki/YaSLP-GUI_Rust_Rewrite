@@ -4987,6 +4987,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "winreg",
  "yaslp-shared",
 ]
 

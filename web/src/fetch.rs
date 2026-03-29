@@ -33,6 +33,61 @@ pub async fn fetch_server_list(cfg: &AppSettings) -> Result<Vec<ServerEntry>, St
     parse_server_list(&body)
 }
 
+/// Detect whether `addr` is a lan-play relay and which backend it runs.
+/// Tries GET /info (rust/node) then GET / (dotnet).
+pub async fn detect_server_type(addr: &str, timeout_ms: u64) -> Result<ServerView, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.max(3_000)))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // rust / node: GET /info → { "online": N, "idle": M, ... }
+    let start = Instant::now();
+    if let Ok(resp) = client.get(&format!("http://{}/info", addr)).send().await {
+        let elapsed = start.elapsed().as_millis();
+        if let Ok(body) = resp.text().await {
+            if let Ok(status) = serde_json::from_str::<ServerStatus>(&body) {
+                if status.online.is_some() || status.idle.is_some() {
+                    let mut view = ServerView {
+                        addr: addr.to_string(),
+                        server_type: "rust".into(),
+                        flag: None,
+                        reachable: true,
+                        online: None, idle: None, version: None, client_count: None,
+                        ping_ms: Some(elapsed),
+                    };
+                    view.apply_status(status, elapsed);
+                    return Ok(view);
+                }
+            }
+        }
+    }
+
+    // dotnet: GET / → { "clientCount": N }
+    let start = Instant::now();
+    if let Ok(resp) = client.get(&format!("http://{}/", addr)).send().await {
+        let elapsed = start.elapsed().as_millis();
+        if let Ok(body) = resp.text().await {
+            if let Ok(status) = serde_json::from_str::<ServerStatus>(&body) {
+                if status.client_count.is_some() {
+                    let mut view = ServerView {
+                        addr: addr.to_string(),
+                        server_type: "dotnet".into(),
+                        flag: None,
+                        reachable: true,
+                        online: None, idle: None, version: None, client_count: None,
+                        ping_ms: Some(elapsed),
+                    };
+                    view.apply_status(status, elapsed);
+                    return Ok(view);
+                }
+            }
+        }
+    }
+
+    Err("Not a lan-play server".into())
+}
+
 pub async fn check_server(client: &Client, mut view: ServerView, status_url: String) -> ServerView {
     let start = Instant::now();
     match client.get(&status_url).send().await {

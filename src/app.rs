@@ -72,6 +72,47 @@ struct BgResult {
     finished: bool,
 }
 
+// ── NIC enumeration ──────────────────────────────────────────────────────────
+/// Returns (display_name, pcap_device_name) pairs for non-loopback interfaces.
+fn enumerate_nics() -> Vec<(String, String)> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut nics = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/class/net") {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name != "lo" {
+                    nics.push((name.clone(), name));
+                }
+            }
+        }
+        nics.sort_by(|a, b| a.0.cmp(&b.0));
+        nics
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let net_class = r"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}";
+        let mut nics = Vec::new();
+        if let Ok(base) = hklm.open_subkey(net_class) {
+            for guid in base.enum_keys().flatten() {
+                // Skip the "Descriptions" value and non-GUID entries
+                if !guid.starts_with('{') { continue; }
+                let conn_path = format!("{}\\{}\\Connection", net_class, guid);
+                if let Ok(conn) = hklm.open_subkey(&conn_path) {
+                    let friendly: String = conn.get_value("Name").unwrap_or_else(|_| guid.clone());
+                    let pcap_name = format!("\\Device\\NPF_{}", guid);
+                    nics.push((friendly, pcap_name));
+                }
+            }
+        }
+        nics.sort_by(|a, b| a.0.cmp(&b.0));
+        nics
+    }
+}
+
 // ── WinPcap / Npcap detection (Windows only) ────────────────────────────────
 fn check_pcap() -> bool {
     #[cfg(target_os = "windows")]
@@ -105,6 +146,10 @@ pub struct YaSLPApp {
     // Download state
     dl_state: DownloadState,
     dl_bg: Option<Arc<Mutex<Option<Result<(), String>>>>>,
+    // Periodic ping: updated results written here every second
+    periodic_ping_results: Arc<Mutex<Option<Vec<(String, Option<u128>, bool, crate::models::ServerStatus)>>>>,
+    // Set to true to stop the running periodic ping thread
+    stop_periodic_ping: Arc<std::sync::atomic::AtomicBool>,
 
     // WinPcap / Npcap present (always true on non-Windows)
     pcap_ok: bool,
@@ -138,11 +183,27 @@ pub struct YaSLPApp {
     /// Exact PID of lan-play (child of sudo), resolved after spawn via /proc.
     #[cfg(not(target_os = "windows"))]
     lan_play_exact_pid: Arc<Mutex<Option<u32>>>,
+    /// Set to true by the stderr reader thread when sudo reports a bad password.
+    #[cfg(not(target_os = "windows"))]
+    sudo_auth_failed: Arc<Mutex<bool>>,
 
     // Settings window edit buffer
     edit: AppSettings,
     // Quick-connect address buffer
     qc_addr: String,
+    first_frame: bool,
+    // QC server info (populated after API detection succeeds)
+    qc_server_info: Option<crate::models::Server>,
+    // Background API-type detection result
+    qc_check_bg: Option<Arc<Mutex<Option<Result<crate::models::Server, String>>>>>,
+    // Periodic ping results for the QC-connected server
+    qc_ping_results: Arc<Mutex<Option<(Option<u128>, bool, crate::models::ServerStatus)>>>,
+    // Stop signal for the QC periodic ping thread
+    stop_qc_ping: Arc<std::sync::atomic::AtomicBool>,
+    /// Available NICs: (display_name, pcap_device_name).
+    /// On Linux both are the interface name. On Windows display is the friendly
+    /// adapter name and pcap_device_name is "\Device\NPF_{GUID}".
+    nic_list: Vec<(String, String)>,
 }
 
 impl Default for YaSLPApp {
@@ -158,10 +219,12 @@ impl Default for YaSLPApp {
             show_quickconnect: false,
             show_about: false,
             hide_offline: true,
-            status_msg: "Ready — click Refresh to load servers.".into(),
+            status_msg: "Starting…".into(),
             bg: None,
             dl_state: DownloadState::Idle,
             dl_bg: None,
+            periodic_ping_results: Arc::new(Mutex::new(None)),
+            stop_periodic_ping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pcap_ok: check_pcap(),
             lan_play_child: None,
             #[cfg(target_os = "windows")]
@@ -182,17 +245,33 @@ impl Default for YaSLPApp {
             sudo_password_for_kill: None,
             #[cfg(not(target_os = "windows"))]
             lan_play_exact_pid: Arc::new(Mutex::new(None)),
+            #[cfg(not(target_os = "windows"))]
+            sudo_auth_failed: Arc::new(Mutex::new(false)),
             edit,
             qc_addr: String::new(),
+            first_frame: true,
+            qc_server_info: None,
+            qc_check_bg: None,
+            qc_ping_results: Arc::new(Mutex::new(None)),
+            stop_qc_ping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            nic_list: enumerate_nics(),
         }
     }
 }
 
 impl eframe::App for YaSLPApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::mem::replace(&mut self.first_frame, false) {
+            self.start_refresh();
+        }
         self.apply_theme(ctx);
         self.poll_bg(ctx);
         self.poll_dl_bg();
+        self.poll_periodic_pings();
+        self.poll_qc_check(ctx);
+        self.poll_qc_pings();
+        #[cfg(not(target_os = "windows"))]
+        self.poll_sudo_auth(ctx);
 
         self.draw_top_bar(ctx);
         self.draw_side_panel(ctx);
@@ -364,22 +443,13 @@ impl YaSLPApp {
                     ui.add_space(6.0);
                 }
 
-                let mut visible: Vec<(usize, &Server)> = self
+                let visible: Vec<(usize, &Server)> = self
                     .servers
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| !s.entry.is_hidden())
                     .filter(|(_, s)| !self.hide_offline || s.reachable)
                     .collect();
-                visible.sort_by(|(_, a), (_, b)| {
-                    match (a.ping_ms, b.ping_ms) {
-                        (Some(pa), Some(pb)) => pa.cmp(&pb),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
-                });
-
                 if visible.is_empty() {
                     ui.centered_and_justified(|ui| {
                         let msg = match &self.load_state {
@@ -443,9 +513,17 @@ impl YaSLPApp {
                 );
                 ui.add_space(10.0);
 
-                if let Some(idx) = self.selected {
-                    if let Some(s) = self.servers.get(idx) {
-                        let s = s.clone();
+                // QC-connected server takes priority in the detail panel.
+                let qc_active = self.is_connected() && self.qc_server_info.is_some();
+                let display: Option<crate::models::Server> = if qc_active {
+                    self.qc_server_info.clone()
+                } else if let Some(idx) = self.selected {
+                    self.servers.get(idx).cloned()
+                } else {
+                    None
+                };
+
+                if let Some(s) = display {
                         detail_row(ui, "Address", &s.entry.addr());
                         detail_row(ui, "Type", &s.entry.type_str());
                         detail_row(
@@ -517,7 +595,6 @@ impl YaSLPApp {
 
                         ui.add_space(8.0);
                         self.draw_download_button(ui, ctx);
-                    }
                 } else {
                     ui.label(
                         RichText::new("Select a server\nto see details.")
@@ -587,6 +664,38 @@ impl YaSLPApp {
                                 self.edit.http_timeout_ms = v;
                             }
                         }
+                        ui.end_row();
+
+                        // Network interface (--netif)
+                        ui.label(RichText::new("Network Interface").color(C_TEXT));
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.edit.use_netif, "");
+                            ui.add_enabled_ui(self.edit.use_netif, |ui| {
+                                egui::ComboBox::from_id_salt("netif_combo")
+                                    .selected_text(if self.edit.netif.is_empty() {
+                                        "Select interface…".to_string()
+                                    } else {
+                                        // Show friendly name for the stored pcap name
+                                        self.nic_list.iter()
+                                            .find(|(_, pcap)| pcap == &self.edit.netif)
+                                            .map(|(friendly, _)| friendly.clone())
+                                            .unwrap_or_else(|| self.edit.netif.clone())
+                                    })
+                                    .width(260.0)
+                                    .show_ui(ui, |ui| {
+                                        for (friendly, pcap_name) in &self.nic_list {
+                                            ui.selectable_value(
+                                                &mut self.edit.netif,
+                                                pcap_name.clone(),
+                                                friendly,
+                                            );
+                                        }
+                                    });
+                                if ui.add(accent_button("⟳")).on_hover_text("Refresh interface list").clicked() {
+                                    self.nic_list = enumerate_nics();
+                                }
+                            });
+                        });
                         ui.end_row();
 
                         // Server list URL
@@ -695,7 +804,9 @@ impl YaSLPApp {
                     }
                 });
             });
-        self.show_settings = open;
+        if !open {
+            self.show_settings = false;
+        }
     }
 
     // ── Quick Connect window ─────────────────────────────────────────────────
@@ -723,7 +834,7 @@ impl YaSLPApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if self.lan_play_child.is_some() {
+                    if self.is_connected() {
                         let btn = egui::Button::new(
                             RichText::new("■  Disconnect").color(Color32::WHITE),
                         )
@@ -734,6 +845,15 @@ impl YaSLPApp {
                             self.disconnect(ctx);
                             self.show_quickconnect = false;
                         }
+                    } else if self.qc_check_bg.is_some() {
+                        // Check in progress — show spinner label, no button yet.
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(RichText::new("⏳  Checking…").color(C_TEXT_DIM))
+                                .fill(C_BORDER)
+                                .corner_radius(6.0)
+                                .min_size(Vec2::new(100.0, 28.0)),
+                        );
                     } else {
                         let binary_exists = std::path::Path::new(&self.settings.client_binary()).exists();
                         let can = !self.qc_addr.trim().is_empty() && binary_exists && self.pcap_ok;
@@ -745,8 +865,8 @@ impl YaSLPApp {
                         .min_size(Vec2::new(100.0, 28.0));
                         if ui.add_enabled(can, btn).clicked() {
                             let addr = self.qc_addr.trim().to_string();
-                            self.connect_to(&addr, ctx);
-                            self.show_quickconnect = false;
+                            self.start_qc_check(&addr, ctx);
+                            // Window stays open so user sees the Checking state.
                         }
                     }
                     ui.add_space(8.0);
@@ -764,7 +884,11 @@ impl YaSLPApp {
                     }
                 });
             });
-        self.show_quickconnect = open;
+        // Only let the X button close the window via `open`; don't override
+        // `show_quickconnect = false` that was already set inside the callback.
+        if !open {
+            self.show_quickconnect = false;
+        }
     }
 
     // ── About window ─────────────────────────────────────────────────────────
@@ -835,6 +959,9 @@ impl YaSLPApp {
 
     // ── Background refresh logic ─────────────────────────────────────────────
     fn start_refresh(&mut self) {
+        // Stop any running periodic ping thread before starting a fresh load.
+        self.stop_periodic_ping.store(true, Ordering::Relaxed);
+        self.stop_periodic_ping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.servers.clear();
         self.selected = None;
         self.status_msg = "Fetching server list…".into();
@@ -909,13 +1036,23 @@ impl YaSLPApp {
                 self.status_msg = format!("Error: {e}");
             } else {
                 let online = servers.iter().filter(|s| s.reachable).count();
-                self.servers = servers;
+                // Sort once after the initial load; periodic updates keep this order.
+                let mut sorted = servers;
+                sorted.sort_by(|a, b| match (a.ping_ms, b.ping_ms) {
+                    (Some(pa), Some(pb)) => pa.cmp(&pb),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                });
+                self.servers = sorted;
                 self.load_state = LoadState::Done;
                 self.status_msg = format!(
                     "Loaded {} servers — {} online.",
                     self.servers.len(),
                     online
                 );
+                // Launch periodic background ping (every 1 s, updates in place).
+                self.start_periodic_ping(ctx);
             }
             self.bg = None;
         } else {
@@ -923,6 +1060,130 @@ impl YaSLPApp {
             self.servers = servers;
             self.status_msg = format!("Checking servers… {done}/{total}");
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    // ── Periodic background ping ─────────────────────────────────────────────
+    fn start_periodic_ping(&mut self, ctx: &egui::Context) {
+        let entries: Vec<_> = self.servers.iter().map(|s| s.entry.clone()).collect();
+        if entries.is_empty() { return; }
+        let results_arc = self.periodic_ping_results.clone();
+        let stop = self.stop_periodic_ping.clone();
+        let timeout_ms = self.settings.http_timeout_ms;
+        let ctx2 = ctx.clone();
+        thread::spawn(move || {
+            let Ok(client) = fetch::build_client(timeout_ms) else { return };
+            loop {
+                // Wait 1 second between rounds, checking stop flag frequently.
+                for _ in 0..10 {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    if stop.load(Ordering::Relaxed) { return; }
+                }
+                let round: Vec<_> = entries.par_iter().map(|entry| {
+                    let server = crate::models::Server::from_entry(entry.clone());
+                    let checked = fetch::check_server(&client, server);
+                    (entry.addr(), checked.ping_ms, checked.reachable, checked.status.clone())
+                }).collect();
+                if stop.load(Ordering::Relaxed) { return; }
+                if let Ok(mut g) = results_arc.lock() { *g = Some(round); }
+                ctx2.request_repaint();
+            }
+        });
+    }
+
+    fn poll_periodic_pings(&mut self) {
+        let results = {
+            let mut g = self.periodic_ping_results.lock().unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            g.take()
+        };
+        let Some(results) = results else { return };
+        for (addr, ping_ms, reachable, status) in results {
+            if let Some(server) = self.servers.iter_mut().find(|s| s.entry.addr() == addr) {
+                server.ping_ms = ping_ms;
+                server.reachable = reachable;
+                server.status = status;
+            }
+        }
+    }
+
+    // ── QC server type detection ─────────────────────────────────────────────
+
+    fn start_qc_check(&mut self, addr: &str, ctx: &egui::Context) {
+        self.stop_qc_ping.store(true, Ordering::Relaxed);
+        self.qc_server_info = None;
+        let addr = addr.to_string();
+        let timeout_ms = self.settings.http_timeout_ms;
+        let shared: Arc<Mutex<Option<Result<crate::models::Server, String>>>> =
+            Arc::new(Mutex::new(None));
+        self.qc_check_bg = Some(shared.clone());
+        let ctx2 = ctx.clone();
+        thread::spawn(move || {
+            let result = fetch::detect_server_type(&addr, timeout_ms);
+            if let Ok(mut g) = shared.lock() { *g = Some(result); }
+            ctx2.request_repaint();
+        });
+    }
+
+    fn poll_qc_check(&mut self, ctx: &egui::Context) {
+        let Some(shared) = &self.qc_check_bg else { return };
+        let result = {
+            let mut g = shared.lock().unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            g.take()
+        };
+        let Some(result) = result else { return };
+        self.qc_check_bg = None;
+        match result {
+            Ok(server) => {
+                // Server is a valid lan-play relay — now actually connect.
+                let addr = server.entry.addr();
+                self.qc_server_info = Some(server);
+                self.start_qc_periodic_ping(ctx);
+                self.connect_to(&addr, ctx);
+            }
+            Err(msg) => {
+                self.status_msg = format!("Error: {msg}");
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn start_qc_periodic_ping(&mut self, ctx: &egui::Context) {
+        self.stop_qc_ping.store(true, Ordering::Relaxed);
+        self.stop_qc_ping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let Some(ref server) = self.qc_server_info else { return };
+        let entry = server.entry.clone();
+        let results = self.qc_ping_results.clone();
+        let stop = self.stop_qc_ping.clone();
+        let timeout_ms = self.settings.http_timeout_ms;
+        let ctx2 = ctx.clone();
+        thread::spawn(move || {
+            let Ok(client) = fetch::build_client(timeout_ms) else { return };
+            loop {
+                for _ in 0..10 {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    if stop.load(Ordering::Relaxed) { return; }
+                }
+                let s = crate::models::Server::from_entry(entry.clone());
+                let checked = fetch::check_server(&client, s);
+                if stop.load(Ordering::Relaxed) { return; }
+                if let Ok(mut g) = results.lock() {
+                    *g = Some((checked.ping_ms, checked.reachable, checked.status));
+                }
+                ctx2.request_repaint();
+            }
+        });
+    }
+
+    fn poll_qc_pings(&mut self) {
+        let result = {
+            let mut g = self.qc_ping_results.lock().unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            g.take()
+        };
+        let Some((ping_ms, reachable, status)) = result else { return };
+        if let Some(ref mut server) = self.qc_server_info {
+            server.ping_ms = ping_ms;
+            server.reachable = reachable;
+            server.status = status;
         }
     }
 
@@ -944,16 +1205,35 @@ impl YaSLPApp {
         }
         lan_args.push("--relay-server-addr".into());
         lan_args.push(addr.to_string());
+        if self.settings.use_netif && !self.settings.netif.is_empty() {
+            lan_args.push("--netif".into());
+            lan_args.push(self.settings.netif.clone());
+        }
         // Disable C-runtime buffering on stdout/stderr so output arrives
         // immediately even when lan-play's stdout/stderr is a pipe, not a TTY.
         lan_args.push("--set-ionbf".into());
 
         #[cfg(not(target_os = "windows"))]
         if self.settings.privileged {
-            // Show password dialog; actual spawn happens after the user confirms.
-            self.pending_connect_addr = addr.to_string();
-            self.sudo_password.clear();
-            self.show_sudo_dialog = true;
+            // Check if sudo credential cache is still valid (exits instantly).
+            let cache_valid = Command::new("sudo")
+                .args(["-n", "-v"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .and_then(|mut c| c.wait())
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if cache_valid {
+                // Cache is fresh — connect without prompting.
+                self.spawn_privileged(binary, lan_args, None, ctx);
+            } else {
+                // Cache expired — ask for password.
+                self.pending_connect_addr = addr.to_string();
+                self.sudo_password.clear();
+                self.show_sudo_dialog = true;
+            }
             return;
         }
         #[cfg(target_os = "windows")]
@@ -1192,12 +1472,17 @@ impl YaSLPApp {
         &mut self,
         binary: String,
         lan_args: Vec<String>,
-        password: String,
+        password: Option<String>,
         ctx: &egui::Context,
     ) {
-        let mut sudo_args = vec!["-S".to_string(), binary.clone()];
+        // Use -n (non-interactive, cached credentials) when no password is
+        // supplied, -S (read from stdin) when a password is provided.
+        let (flag, cmd_display) = match &password {
+            None    => ("-n", format!("sudo -n {} {}", binary, lan_args.join(" "))),
+            Some(_) => ("-S", format!("sudo {} {}", binary, lan_args.join(" "))),
+        };
+        let mut sudo_args = vec![flag.to_string(), binary.clone()];
         sudo_args.extend(lan_args.iter().cloned());
-        let cmd_display = format!("sudo {} {}", binary, lan_args.join(" "));
 
         match Command::new("sudo")
             .args(&sudo_args)
@@ -1209,17 +1494,22 @@ impl YaSLPApp {
             Ok(mut child) => {
                 let sudo_pid = child.id();
 
-                // Write the password to sudo's stdin synchronously, then
-                // explicitly flush and drop (close) the pipe so sudo receives
-                // a clean EOF after the password — required on Arch/newer sudo.
+                // Write the password to sudo's stdin and close the pipe.
+                // When using -n the pipe is left empty (sudo ignores stdin).
                 if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(format!("{password}\n").as_bytes());
-                    let _ = stdin.flush();
+                    if let Some(pw) = &password {
+                        let _ = stdin.write_all(format!("{pw}\n").as_bytes());
+                        let _ = stdin.flush();
+                    }
                     // stdin drops here, closing the pipe
                 }
 
                 // Store password for the kill step and reset the PID slot.
-                self.sudo_password_for_kill = Some(password);
+                // When using cached credentials (password = None) we keep any
+                // previously stored password so disconnect can still kill sudo.
+                if password.is_some() {
+                    self.sudo_password_for_kill = password;
+                }
                 if let Ok(mut g) = self.lan_play_exact_pid.lock() { *g = None; }
 
                 // Resolve lan-play's exact PID (child of sudo) via /proc.
@@ -1266,6 +1556,7 @@ impl YaSLPApp {
                 if let Some(stderr) = child.stderr.take() {
                     let out = output.clone();
                     let ctx2 = ctx.clone();
+                    let process_exited = self.sudo_auth_failed.clone();
                     thread::spawn(move || {
                         let mut reader = BufReader::new(stderr);
                         let mut buf = vec![0u8; 1024];
@@ -1279,6 +1570,10 @@ impl YaSLPApp {
                                 }
                             }
                         }
+                        // Pipe closed = sudo exited. Signal the UI to check
+                        // the exit code (locale-independent auth failure detection).
+                        if let Ok(mut f) = process_exited.lock() { *f = true; }
+                        ctx2.request_repaint();
                     });
                 }
 
@@ -1289,6 +1584,51 @@ impl YaSLPApp {
             Err(e) => {
                 self.status_msg = format!("Failed to launch: {e}");
             }
+        }
+    }
+
+    // ── sudo process-exit detector — Linux only ──────────────────────────────
+    #[cfg(not(target_os = "windows"))]
+    fn poll_sudo_auth(&mut self, ctx: &egui::Context) {
+        // The stderr reader thread sets this flag when the pipe closes (= sudo exited).
+        let pipe_closed = {
+            let mut g = self.sudo_auth_failed.lock().unwrap_or_else(|e| e.into_inner());
+            let v = *g;
+            *g = false;
+            v
+        };
+        if !pipe_closed { return; }
+
+        // If lan-play's PID was ever found in /proc, sudo authenticated
+        // successfully and lan-play actually ran — any exit here is normal
+        // (disconnect, crash, etc.), not an auth failure.
+        let lan_play_ran = self.lan_play_exact_pid
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(true); // if lock fails, assume it ran to be safe
+        if lan_play_ran {
+            return;
+        }
+
+        // lan-play's PID was never observed → sudo likely rejected the password.
+        // Confirm via exit code to avoid false positives.
+        let auth_failed = if let Some(child) = self.lan_play_child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => !status.success(),
+                Ok(None) => false,
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        if auth_failed {
+            self.lan_play_child.take();
+            self.show_console = false;
+            self.status_msg = "Wrong sudo password — try again.".into();
+            self.sudo_password.clear();
+            self.show_sudo_dialog = true;
+            ctx.request_repaint();
         }
     }
 
@@ -1356,11 +1696,15 @@ impl YaSLPApp {
             }
             lan_args.push("--relay-server-addr".into());
             lan_args.push(addr);
+            if self.settings.use_netif && !self.settings.netif.is_empty() {
+                lan_args.push("--netif".into());
+                lan_args.push(self.settings.netif.clone());
+            }
             lan_args.push("--set-ionbf".into());
             let password = std::mem::take(&mut self.sudo_password);
             self.show_sudo_dialog = false;
             ctx.request_repaint();
-            self.spawn_privileged(binary, lan_args, password, ctx);
+            self.spawn_privileged(binary, lan_args, Some(password), ctx);
         } else if do_cancel {
             self.sudo_password.clear();
             self.show_sudo_dialog = false;
@@ -1369,6 +1713,11 @@ impl YaSLPApp {
     }
 
     fn disconnect(&mut self, ctx: &egui::Context) {
+        // Stop QC server tracking.
+        self.stop_qc_ping.store(true, Ordering::Relaxed);
+        self.qc_server_info = None;
+        self.qc_check_bg = None;
+
         #[cfg(target_os = "windows")]
         if let Some(proc_handle) = self.lan_play_elevated_handle.take() {
             use windows_sys::Win32::Foundation::CloseHandle;
@@ -1391,25 +1740,28 @@ impl YaSLPApp {
         }
         if let Some(mut child) = self.lan_play_child.take() {
             #[cfg(not(target_os = "windows"))]
-            if let Some(password) = self.sudo_password_for_kill.take() {
+            {
                 let pid = self.lan_play_exact_pid.lock().ok().and_then(|g| *g);
 
-                // Step 1: refresh the sudo credential cache with the stored password.
-                if let Ok(mut v) = Command::new("sudo")
-                    .args(["-S", "-v"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    if let Some(mut stdin) = v.stdin.take() {
-                        let _ = stdin.write_all(format!("{password}\n").as_bytes());
+                // If we have a stored password, refresh the credential cache first.
+                // When the cache was already used to connect (-n path), skip this
+                // step — the cache is still fresh and sudo -n kill works directly.
+                if let Some(pw) = self.sudo_password_for_kill.take() {
+                    if let Ok(mut v) = Command::new("sudo")
+                        .args(["-S", "-v"])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        if let Some(mut stdin) = v.stdin.take() {
+                            let _ = stdin.write_all(format!("{pw}\n").as_bytes());
+                        }
+                        let _ = v.wait();
                     }
-                    let _ = v.wait();
                 }
 
-                // Step 2: kill lan-play by exact PID using the now-fresh cache
-                // (sudo -n = non-interactive, no password prompt).
+                // Kill lan-play by exact PID using the cached credentials.
                 if let Some(p) = pid {
                     let _ = Command::new("sudo")
                         .args(["-n", "kill", "-9", &p.to_string()])

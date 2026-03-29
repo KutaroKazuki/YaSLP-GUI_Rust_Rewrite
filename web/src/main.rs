@@ -17,7 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-use models::{AppSettings, ServerView};
+use models::{AppSettings, ServerStatus, ServerView};
 
 static INDEX_HTML: &str = include_str!("../index.html");
 
@@ -37,6 +37,8 @@ struct AppState {
     console_output: Arc<Mutex<String>>,
 
     download_state: String, // "idle" | "downloading" | "done" | error message
+    /// Detected server info for a Quick Connect session; updated by periodic ping.
+    qc_server: Option<ServerView>,
     #[cfg(not(target_os = "windows"))]
     sudo_password_for_kill: Option<String>,
     #[cfg(not(target_os = "windows"))]
@@ -63,13 +65,19 @@ struct StateResponse {
     console_cmd: String,
     console: String,
     download_state: String,
+    qc_server: Option<ServerView>,
 }
 
 #[derive(Deserialize)]
 struct ConnectRequest {
     addr: String,
-    #[allow(dead_code)]
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     sudo_password: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DetectRequest {
+    addr: String,
 }
 
 // ── Error helper ──────────────────────────────────────────────────────────────
@@ -172,7 +180,15 @@ async fn post_refresh(State(shared): State<Shared>) -> impl IntoResponse {
             let _ = h.await;
         }
 
-        shared2.lock().await.refreshing = false;
+        let mut s = shared2.lock().await;
+        // Sort once after the initial load; periodic pings update in-place.
+        s.servers.sort_by(|a, b| match (a.ping_ms, b.ping_ms) {
+            (Some(pa), Some(pb)) => pa.cmp(&pb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        s.refreshing = false;
     });
 
     (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true })))
@@ -209,14 +225,16 @@ async fn post_connect(
     }
     lan_args.push("--relay-server-addr".into());
     lan_args.push(req.addr.clone());
+    if cfg.use_netif && !cfg.netif.is_empty() {
+        lan_args.push("--netif".into());
+        lan_args.push(cfg.netif.clone());
+    }
+    lan_args.push("--set-ionbf".into());
 
     #[cfg(not(target_os = "windows"))]
     if cfg.privileged {
-        let pw = req.sudo_password.clone().unwrap_or_default();
-        if pw.is_empty() {
-            return Err(ApiError(StatusCode::BAD_REQUEST, "sudo_password_required".into()));
-        }
-        spawn_privileged(shared, binary, lan_args, pw, req.addr).await?;
+        // Pass None to use cached sudo credentials; Some(pw) to authenticate.
+        spawn_privileged(shared, binary, lan_args, req.sudo_password.clone(), req.addr).await?;
         return Ok(Json(serde_json::json!({ "ok": true })));
     }
 
@@ -272,21 +290,22 @@ async fn spawn_privileged(
     shared: Shared,
     binary: String,
     lan_args: Vec<String>,
-    password: String,
+    password: Option<String>,
     addr: String,
 ) -> Result<(), ApiError> {
     use std::io::Write;
     use std::os::unix::process::CommandExt as _;
 
-    let mut sudo_args = vec!["-S".to_string(), binary.clone()];
+    // Use -n (cached credentials) when no password supplied, -S otherwise.
+    let (flag, cmd_display) = match &password {
+        None    => ("-n", format!("sudo -n {} {}", binary, lan_args.join(" "))),
+        Some(_) => ("-S", format!("sudo {} {}", binary, lan_args.join(" "))),
+    };
+    let mut sudo_args = vec![flag.to_string(), binary.clone()];
     sudo_args.extend(lan_args.iter().cloned());
-    let cmd_display = format!("sudo {} {}", binary, lan_args.join(" "));
 
     match Command::new("sudo")
         .args(&sudo_args)
-        // Give sudo its own process group (PGID = sudo's PID).
-        // lan-play inherits that PGID, so `kill -9 -<pgid>` kills both
-        // in one shot — no need to chase lan-play's exact PID via /proc.
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -294,12 +313,13 @@ async fn spawn_privileged(
         .spawn()
     {
         Ok(mut child) => {
-            // With process_group(0), PGID == sudo's own PID — available immediately.
             let sudo_pgid = child.id();
 
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(format!("{password}\n").as_bytes());
-                let _ = stdin.flush();
+                if let Some(ref pw) = password {
+                    let _ = stdin.write_all(format!("{pw}\n").as_bytes());
+                    let _ = stdin.flush();
+                }
             }
 
             let output = Arc::new(Mutex::new(String::new()));
@@ -325,9 +345,10 @@ async fn spawn_privileged(
             s.console_cmd = cmd_display;
             s.connected_addr = Some(addr);
             s.lan_play_child = Some(child);
-            s.sudo_password_for_kill = Some(password);
-            // Store the PGID (not lan-play's individual PID).
-            // do_sudo_kill uses `kill -9 -<pgid>` to kill the whole group.
+            // Only store password if one was provided (cache path keeps any previous pw).
+            if password.is_some() {
+                s.sudo_password_for_kill = password;
+            }
             s.lan_play_exact_pid = Arc::new(Mutex::new(Some(sudo_pgid)));
             Ok(())
         }
@@ -350,6 +371,7 @@ async fn post_disconnect(State(shared): State<Shared>) -> impl IntoResponse {
         // Clear connected state immediately — poll will pick this up right away
         s.connected_addr = None;
         s.console_cmd = String::new();
+        s.qc_server = None;
         // Keep console_output intact so the user can still read it (matches GUI behaviour:
         // the GUI sets show_console=false but does not wipe the output buffer)
 
@@ -397,28 +419,27 @@ async fn post_disconnect(State(shared): State<Shared>) -> impl IntoResponse {
 fn do_sudo_kill(sudo_pw: Option<String>, pgid: Option<u32>) {
     use std::io::Write;
 
-    let password = match sudo_pw {
-        Some(pw) if !pw.is_empty() => pw,
-        _ => return,
-    };
-
-    // Refresh sudo credential cache so the non-interactive -n kill works
-    if let Ok(mut v) = Command::new("sudo")
-        .args(["-S", "-v"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        if let Some(mut stdin) = v.stdin.take() {
-            let _ = stdin.write_all(format!("{password}\n").as_bytes());
-            let _ = stdin.flush();
+    // If we have a stored password, refresh the credential cache first.
+    // When the cache was used to connect (-n path), skip this — cache is still fresh.
+    if let Some(pw) = sudo_pw {
+        if !pw.is_empty() {
+            if let Ok(mut v) = Command::new("sudo")
+                .args(["-S", "-v"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = v.stdin.take() {
+                    let _ = stdin.write_all(format!("{pw}\n").as_bytes());
+                    let _ = stdin.flush();
+                }
+                let _ = v.wait();
+            }
         }
-        let _ = v.wait();
     }
 
-    // `kill -9 -<pgid>` sends SIGKILL to every process in the group:
-    // the sudo wrapper AND lan-play (which inherited the PGID).
+    // Kill the entire process group via -n (cache is valid either way).
     if let Some(pg) = pgid {
         let _ = Command::new("sudo")
             .args(["-n", "kill", "-9", &format!("-{pg}")])
@@ -450,6 +471,7 @@ async fn get_state(State(shared): State<Shared>) -> impl IntoResponse {
         console_cmd: s.console_cmd.clone(),
         console,
         download_state: s.download_state.clone(),
+        qc_server: s.qc_server.clone(),
     })
 }
 
@@ -492,6 +514,81 @@ async fn get_info(State(shared): State<Shared>) -> impl IntoResponse {
     }))
 }
 
+async fn get_nics() -> impl IntoResponse {
+    Json(serde_json::json!({ "nics": enumerate_nics() }))
+}
+
+/// Returns `{ "cached": true }` when the sudo credential cache is still valid.
+async fn get_sudo_check() -> impl IntoResponse {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let cached = Command::new("sudo")
+            .args(["-n", "-v"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut c| c.wait())
+            .map(|s| s.success())
+            .unwrap_or(false);
+        return Json(serde_json::json!({ "cached": cached }));
+    }
+    #[cfg(target_os = "windows")]
+    Json(serde_json::json!({ "cached": false }))
+}
+
+async fn post_detect(
+    State(shared): State<Shared>,
+    Json(req): Json<DetectRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let timeout_ms = { shared.lock().await.settings.http_timeout_ms };
+    match fetch::detect_server_type(&req.addr, timeout_ms).await {
+        Ok(view) => {
+            shared.lock().await.qc_server = Some(view.clone());
+            Ok(Json(serde_json::json!({ "ok": true, "server": view })))
+        }
+        Err(msg) => Err(ApiError(StatusCode::BAD_GATEWAY, msg)),
+    }
+}
+
+/// Returns (display_name, pcap_device_name) pairs for non-loopback interfaces.
+fn enumerate_nics() -> Vec<serde_json::Value> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut nics = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/class/net") {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name != "lo" {
+                    nics.push(serde_json::json!({ "display": name, "pcap": name }));
+                }
+            }
+        }
+        nics.sort_by(|a, b| a["display"].as_str().cmp(&b["display"].as_str()));
+        nics
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let net_class = r"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}";
+        let mut nics = Vec::new();
+        if let Ok(base) = hklm.open_subkey(net_class) {
+            for guid in base.enum_keys().flatten() {
+                if !guid.starts_with('{') { continue; }
+                let conn_path = format!("{}\\{}\\Connection", net_class, guid);
+                if let Ok(conn) = hklm.open_subkey(&conn_path) {
+                    let friendly: String = conn.get_value("Name").unwrap_or_else(|_| guid.clone());
+                    let pcap_name = format!("\\Device\\NPF_{}", guid);
+                    nics.push(serde_json::json!({ "display": friendly, "pcap": pcap_name }));
+                }
+            }
+        }
+        nics.sort_by(|a, b| a["display"].as_str().cmp(&b["display"].as_str()));
+        nics
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -513,11 +610,94 @@ async fn main() {
         console_cmd: String::new(),
         console_output: Arc::new(Mutex::new(String::new())),
         download_state: "idle".into(),
+        qc_server: None,
         #[cfg(not(target_os = "windows"))]
         sudo_password_for_kill: None,
         #[cfg(not(target_os = "windows"))]
         lan_play_exact_pid: Arc::new(Mutex::new(None)),
     }));
+
+    // ── Periodic ping task (every 1 s, updates servers in-place) ─────────────
+    {
+        let state_ping = state.clone();
+        tokio::spawn(async move {
+            let mut ping_client: Option<(u64, Arc<reqwest::Client>)> = None;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                let (to_ping, timeout_ms) = {
+                    let s = state_ping.lock().await;
+                    if s.refreshing { continue; }
+                    let mut entries: Vec<(String, String, bool)> = s.servers.iter()
+                        .map(|v| (v.addr.clone(), v.status_url(), false))
+                        .collect();
+                    if let Some(ref qc) = s.qc_server {
+                        entries.push((qc.addr.clone(), qc.status_url(), true));
+                    }
+                    if entries.is_empty() { continue; }
+                    (entries, s.settings.http_timeout_ms)
+                };
+
+                // Reuse the client unless the timeout setting changed.
+                let client = match &ping_client {
+                    Some((t, c)) if *t == timeout_ms => c.clone(),
+                    _ => {
+                        match fetch::build_client(timeout_ms) {
+                            Ok(c) => {
+                                let c = Arc::new(c);
+                                ping_client = Some((timeout_ms, c.clone()));
+                                c
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                };
+
+                let mut handles = Vec::new();
+                for (addr, url, is_qc) in to_ping {
+                    let c = client.clone();
+                    handles.push(tokio::spawn(async move {
+                        let start = std::time::Instant::now();
+                        match c.get(&url).send().await {
+                            Ok(resp) => {
+                                let elapsed = start.elapsed().as_millis();
+                                if let Ok(body) = resp.text().await {
+                                    if let Ok(st) = serde_json::from_str::<ServerStatus>(&body) {
+                                        return (addr, Some(elapsed), true, Some(st), is_qc);
+                                    }
+                                }
+                                (addr, Some(elapsed), true, None, is_qc)
+                            }
+                            Err(_) => (addr, None, false, None, is_qc),
+                        }
+                    }));
+                }
+
+                let mut results = Vec::new();
+                for h in handles { if let Ok(r) = h.await { results.push(r); } }
+
+                let mut s = state_ping.lock().await;
+                if s.refreshing { continue; }
+                for (addr, ping_ms, reachable, status, is_qc) in results {
+                    let view_opt = if is_qc {
+                        s.qc_server.as_mut()
+                    } else {
+                        s.servers.iter_mut().find(|v| v.addr == addr)
+                    };
+                    if let Some(v) = view_opt {
+                        v.reachable = reachable;
+                        v.ping_ms   = ping_ms;
+                        if let Some(st) = status {
+                            v.online       = st.online;
+                            v.idle         = st.idle;
+                            v.version      = st.version;
+                            v.client_count = st.client_count;
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(serve_index))
@@ -530,6 +710,9 @@ async fn main() {
         .route("/api/state", get(get_state))
         .route("/api/download", post(post_download))
         .route("/api/info", get(get_info))
+        .route("/api/nics", get(get_nics))
+        .route("/api/sudo-check", get(get_sudo_check))
+        .route("/api/detect", post(post_detect))
         .with_state(state);
 
     let ip = local_ip().unwrap_or_else(|| "127.0.0.1".into());

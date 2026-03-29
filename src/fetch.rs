@@ -68,6 +68,67 @@ pub fn download_binary(dest_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Detect whether `addr` (host:port) is a lan-play relay and which backend
+/// type it runs. Tries GET /info (rust/node) then GET / (dotnet).
+/// Returns a fully-populated Server on success, or an error message.
+pub fn detect_server_type(addr: &str, timeout_ms: u64) -> Result<Server, String> {
+    // Use at least 3 s for first-contact detection.
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms.max(3_000)))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // ── rust / node: GET /info → { "online": N, "idle": M, ... }
+    let start = std::time::Instant::now();
+    if let Ok(resp) = client.get(&format!("http://{}/info", addr)).send() {
+        let elapsed = start.elapsed().as_millis();
+        if let Ok(body) = resp.text() {
+            if let Ok(status) = serde_json::from_str::<ServerStatus>(&body) {
+                if status.online.is_some() || status.idle.is_some() {
+                    return Ok(Server {
+                        entry: make_qc_entry(addr, "rust"),
+                        status,
+                        ping_ms: Some(elapsed),
+                        reachable: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── dotnet: GET / → { "clientCount": N }
+    let start = std::time::Instant::now();
+    if let Ok(resp) = client.get(&format!("http://{}/", addr)).send() {
+        let elapsed = start.elapsed().as_millis();
+        if let Ok(body) = resp.text() {
+            if let Ok(status) = serde_json::from_str::<ServerStatus>(&body) {
+                if status.client_count.is_some() {
+                    return Ok(Server {
+                        entry: make_qc_entry(addr, "dotnet"),
+                        status,
+                        ping_ms: Some(elapsed),
+                        reachable: true,
+                    });
+                }
+            }
+        }
+    }
+
+    Err("Not a lan-play server".into())
+}
+
+fn make_qc_entry(addr: &str, server_type: &str) -> ServerEntry {
+    let mut parts = addr.splitn(2, ':');
+    let ip   = parts.next().unwrap_or(addr).to_string();
+    let port = parts.next().unwrap_or("11451").to_string();
+    ServerEntry {
+        ip: Some(ip),
+        port: Some(serde_json::Value::String(port)),
+        server_type: Some(server_type.into()),
+        ..Default::default()
+    }
+}
+
 /// Check a single server's online status using the provided shared client.
 pub fn check_server(client: &Client, mut server: Server) -> Server {
     let url = server.entry.status_url();
