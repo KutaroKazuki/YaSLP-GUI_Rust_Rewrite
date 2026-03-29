@@ -16,12 +16,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get version from Cargo.toml
+      - name: Get version and changelog
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "tag=v$VERSION" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Collect commits since the previous release tag
+          PREV_TAG=$(git tag --sort=-version:refname | grep '^v' | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            LOG=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s" --no-merges)
+          else
+            LOG=$(git log --pretty=format:"- %s" --no-merges)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$LOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Check if release already exists
         id: check
@@ -120,6 +130,8 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
           body: |
+            ${{ steps.version.outputs.changelog }}
+
             ## Downloads
             | File | Platform |
             |------|----------|
