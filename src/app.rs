@@ -82,6 +82,7 @@ fn check_pcap() -> bool {
         hklm.open_subkey("SOFTWARE\\Npcap").is_ok()
             || hklm.open_subkey("SOFTWARE\\WOW6432Node\\Npcap").is_ok()
             || hklm.open_subkey("SOFTWARE\\WinPcap").is_ok()
+            || hklm.open_subkey("SOFTWARE\\WOW6432Node\\WinPcap").is_ok()
     }
     #[cfg(not(target_os = "windows"))]
     true
