@@ -208,16 +208,14 @@ pub struct YaSLPApp {
 
 impl Default for YaSLPApp {
     fn default() -> Self {
-        let config_path = {
+        // Detect first run by checking whether the OS pointer file exists.
+        let first_run = {
             #[cfg(target_os = "windows")]
-            let base = std::path::PathBuf::from("C:\\YaSLP-GUI");
+            let ptr = dirs::data_local_dir().map(|p| p.join("YaSLP-GUI").join("client_dir.txt"));
             #[cfg(not(target_os = "windows"))]
-            let base = dirs::home_dir()
-                .map(|p| p.join(".config/YaSLP-GUI"))
-                .unwrap_or_else(|| std::path::PathBuf::from("/opt/YaSLP-GUI"));
-            base.join("config.json")
+            let ptr = dirs::data_local_dir().map(|p| p.join("YaSLP-GUI").join("client_dir"));
+            ptr.map(|p| !p.exists()).unwrap_or(true)
         };
-        let first_run = !config_path.exists();
         let settings = cfg_store::load();
         if first_run && !settings.client_dir.is_empty() {
             let _ = std::fs::create_dir_all(&settings.client_dir);
