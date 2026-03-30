@@ -670,6 +670,9 @@
         'YaSLP-Web v' + (info.version || '?');
       document.getElementById('about-version').textContent =
         'v' + (info.version || '?') + ' — Web Edition';
+      if (info.run_as_admin_required) {
+        setStatus('⚠ Privileged mode is on — run yaslp-web.exe as Administrator for lan-play to work.');
+      }
     } catch {}
   }
 

@@ -284,6 +284,8 @@ impl eframe::App for YaSLPApp {
         self.poll_qc_pings();
         #[cfg(not(target_os = "windows"))]
         self.poll_sudo_auth(ctx);
+        #[cfg(target_os = "windows")]
+        self.poll_elevated_exit(ctx);
 
         self.draw_top_bar(ctx);
         self.draw_side_panel(ctx);
@@ -1487,6 +1489,41 @@ impl YaSLPApp {
             } else {
                 self.status_msg = format!("Failed to start as Administrator (error {err}).");
             }
+        }
+        ctx.request_repaint();
+    }
+
+    // ── Elevated process exit monitor — Windows only ────────────────────────
+
+    #[cfg(target_os = "windows")]
+    fn poll_elevated_exit(&mut self, ctx: &egui::Context) {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+        let Some(&handle) = self.lan_play_elevated_handle.as_ref() else { return };
+
+        // Non-blocking check — WAIT_OBJECT_0 means the process has already exited.
+        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_OBJECT_0 {
+            return; // still running
+        }
+
+        let mut exit_code: u32 = 1;
+        unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle) };
+        self.lan_play_elevated_handle = None;
+
+        if let Some(job) = self.lan_play_job_handle.take() {
+            unsafe { CloseHandle(job) };
+        }
+
+        if exit_code == 0 {
+            self.status_msg = "lan-play exited.".into();
+            self.show_console = false;
+        } else {
+            // Non-zero exit — binary missing, wrong path, etc.
+            // Keep the console open so the user can read the error output.
+            self.status_msg = "lan-play exited unexpectedly — see console for details.".into();
+            self.show_console = true;
         }
         ctx.request_repaint();
     }

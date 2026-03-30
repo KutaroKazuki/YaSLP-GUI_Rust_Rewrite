@@ -278,7 +278,31 @@ async fn post_connect(
         return Ok(Json(serde_json::json!({ "ok": true })));
     }
 
-    spawn_process(shared, binary, lan_args, req.addr).await?;
+    spawn_process(shared.clone(), binary, lan_args, req.addr).await?;
+
+    // Detect early exit: wrong binary path, or on Windows, insufficient
+    // privileges (server not running as Administrator).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let mut s = shared.lock().await;
+    if let Some(child) = s.lan_play_child.as_mut() {
+        if let Ok(Some(_)) = child.try_wait() {
+            s.lan_play_child = None;
+            s.connected_addr = None;
+            let output = s.console_output.lock().ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let msg = if output.trim().is_empty() {
+                if cfg!(target_os = "windows") && cfg.privileged {
+                    "launch failed — run yaslp-web.exe as Administrator for privileged mode".into()
+                } else {
+                    "launch failed — check binary path in settings".into()
+                }
+            } else {
+                output.trim().to_string()
+            };
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg));
+        }
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -543,13 +567,16 @@ async fn post_download(State(shared): State<Shared>) -> impl IntoResponse {
 }
 
 async fn get_info(State(shared): State<Shared>) -> impl IntoResponse {
-    #[cfg(not(target_os = "windows"))]
-    let privileged = { let s = shared.lock().await; s.settings.privileged };
-    #[cfg(target_os = "windows")]
-    let privileged = { let _ = shared; false };
+    let privileged_setting = { let s = shared.lock().await; s.settings.privileged };
+    // On Windows there is no in-app UAC dialog; the server itself must be run
+    // as Administrator.  Report privileged=false to suppress the sudo dialog,
+    // but set run_as_admin_required so the frontend can show a hint.
+    let privileged = if cfg!(target_os = "windows") { false } else { privileged_setting };
+    let run_as_admin_required = cfg!(target_os = "windows") && privileged_setting;
     Json(serde_json::json!({
         "platform": std::env::consts::OS,
         "privileged": privileged,
+        "run_as_admin_required": run_as_admin_required,
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
