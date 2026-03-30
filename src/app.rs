@@ -1653,10 +1653,29 @@ impl YaSLPApp {
 
         if auth_failed {
             self.lan_play_child.take();
-            self.show_console = false;
-            self.status_msg = "Wrong sudo password — try again.".into();
-            self.sudo_password.clear();
-            self.show_sudo_dialog = true;
+
+            // Distinguish a wrong password from a launch failure (binary not
+            // found, permission denied, etc.).  If sudo accepted the password
+            // it updates its credential cache; sudo -n -v succeeds immediately.
+            let bad_password = !Command::new("sudo")
+                .args(["-n", "-v"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .and_then(|mut c| c.wait())
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if bad_password {
+                self.show_console = false;
+                self.status_msg = "Wrong sudo password — try again.".into();
+                self.sudo_password.clear();
+                self.show_sudo_dialog = true;
+            } else {
+                // Password was correct; sudo failed to exec the binary.
+                // Keep the console open so the user can read sudo's error.
+                self.status_msg = "Failed to launch — see console for details.".into();
+            }
             ctx.request_repaint();
         }
     }

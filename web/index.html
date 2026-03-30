@@ -856,6 +856,14 @@
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         setStatus('Connect failed: ' + (d.error || r.status));
+        // 401 means wrong password — re-open the sudo dialog so the user
+        // can try again without having to click Connect a second time.
+        if (r.status === 401) {
+          pendingConnectAddr = addr;
+          document.getElementById('sudo-password').value = '';
+          document.getElementById('overlay-sudo').classList.add('open');
+          setTimeout(() => document.getElementById('sudo-password').focus(), 50);
+        }
       } else {
         connected     = true;
         connectedAddr = addr;

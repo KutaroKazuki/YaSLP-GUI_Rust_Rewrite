@@ -234,7 +234,47 @@ async fn post_connect(
     #[cfg(not(target_os = "windows"))]
     if cfg.privileged {
         // Pass None to use cached sudo credentials; Some(pw) to authenticate.
-        spawn_privileged(shared, binary, lan_args, req.sudo_password.clone(), req.addr).await?;
+        spawn_privileged(shared.clone(), binary, lan_args, req.sudo_password.clone(), req.addr).await?;
+
+        // Brief pause: if sudo rejects the password or can't find the binary
+        // it exits within a few milliseconds.  Waiting 300 ms lets us detect
+        // that early exit and return a proper error instead of 200 OK followed
+        // by an immediate disconnect on the next state poll.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let mut s = shared.lock().await;
+        if let Some(child) = s.lan_play_child.as_mut() {
+            if let Ok(Some(_)) = child.try_wait() {
+                s.lan_play_child = None;
+                s.connected_addr = None;
+                let output = s.console_output.lock().ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                // Distinguish wrong password from launch failure: if the
+                // credential cache is now valid the password was accepted by
+                // PAM but the binary couldn't be executed.
+                let cache_valid = Command::new("sudo")
+                    .args(["-n", "-v"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let status = if cache_valid {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                let msg = if output.trim().is_empty() {
+                    if cache_valid { "sudo launch failed — check binary path in settings".into() }
+                    else           { "sudo authentication failed — wrong password?".into() }
+                } else {
+                    output.trim().to_string()
+                };
+                return Err(ApiError(status, msg));
+            }
+        }
+
         return Ok(Json(serde_json::json!({ "ok": true })));
     }
 

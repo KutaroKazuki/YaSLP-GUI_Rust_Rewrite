@@ -19,6 +19,16 @@ build.sh            Cross-platform release build script
 .cargo/config.toml  Cross-compilation linker config
 ```
 
+## Prerequisites (cross-compilation)
+
+```bash
+# Rust targets
+rustup target add x86_64-unknown-linux-gnu armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+# System linkers (Debian/Ubuntu)
+apt install gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu mingw-w64
+```
+
 ## Build Commands
 
 ```bash
@@ -70,16 +80,22 @@ The foundation. All core types live here:
 - `models.rs` — `ServerWrapper` adds display/selection logic on top of `ServerEntry`
 - `settings.rs` — thin wrapper around `yaslp-shared` settings
 
-Linux-specific: the GUI spawns lan-play under `sudo`, tracks the process group (PGID), and kills the entire group on disconnect. A sudo-password caching mechanism is implemented here.
+Platform-specific process management lives in `app.rs`:
+- **Linux**: spawns lan-play under `sudo`, tracks the PGID, kills the entire process group on disconnect; reads NICs from `/sys/class/net`
+- **Windows**: launches lan-play as Administrator via `ShellExecuteExW` (`runas`), captures output through a named pipe, manages the process tree with a Job Object; reads NICs from the Windows registry (friendly name + `\Device\NPF_{GUID}`)
 
 ### Web crate (`web/`)
 - `main.rs` — Axum app setup, shared `Arc<AsyncMutex<AppState>>`, all route handlers
 - `fetch.rs` — async `reqwest` calls (server list refresh, status checks, binary download)
 - `index.html` — self-contained single-file frontend (~1145 lines); served directly by the binary
 
-Web API routes: `GET /`, `POST/GET /api/settings`, `POST /api/refresh`, `GET /api/servers`, `POST /api/connect`, `POST /api/disconnect`, `GET /api/state`, `POST /api/download`, `GET /api/info`
+Web API routes: `GET /`, `POST/GET /api/settings`, `POST /api/refresh`, `GET /api/servers`, `POST /api/connect`, `POST /api/disconnect`, `GET /api/state`, `POST /api/download`, `GET /api/info`, `GET /api/nics`, `GET /api/sudo-check`, `POST /api/detect`
 
 The web server binds to `0.0.0.0` but logs the local machine IP for the user.
+
+## Edition Note
+
+The workspace uses **Rust edition 2024**. Keep this in mind when referencing language features or extern crate behavior.
 
 ## Versioning & Release
 
